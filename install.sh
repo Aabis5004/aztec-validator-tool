@@ -1,92 +1,164 @@
 #!/bin/bash
 set -e
 
-# Colors for better output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# ====== COLORS ======
+BOLD="\033[1m"
+GREEN="\033[32m"
+CYAN="\033[36m"
+YELLOW="\033[33m"
+RED="\033[31m"
+BLUE="\033[34m"
+NC="\033[0m"
 
-echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-echo -e "${CYAN}║            AZTEC VALIDATOR TOOL INSTALLER        ║${NC}"
-echo -e "${CYAN}║                   One-Click Setup                ║${NC}"
-echo -e "${CYAN}║                   by Aabis Lone                  ║${NC}"
-echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
-echo ""
+# ====== CONFIG ======
+BASE_URL="https://api.mainnet.aztec.network"
+COOKIE_FILE="$HOME/.aztec_cookie"
 
-INSTALL_DIR="$HOME/.local/bin"
-SCRIPT_NAME="aztec-stats"
-SCRIPT_URL="https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/validator-stats.sh"
+# ====== HELP ======
+show_help() {
+    echo -e "${CYAN}${BOLD}Aztec Validator Stats Tool${NC}"
+    echo -e "${CYAN}by Aabis Lone${NC}"
+    echo ""
+    echo -e "${BOLD}Usage:${NC}"
+    echo -e "  aztec-stats <validator_address>"
+    echo ""
+    echo -e "${BOLD}Options:${NC}"
+    echo -e "  --set-cookie         Set Cloudflare cookie"
+    echo -e "  --help, -h           Show this help message"
+}
 
-# Create install directory
-mkdir -p "$INSTALL_DIR"
+# ====== VALIDATE ADDRESS ======
+validate_address() {
+    if [[ ! $1 =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+        echo -e "${RED}❌ Invalid Ethereum address${NC}"
+        exit 1
+    fi
+}
 
-echo -e "${BLUE}ℹ️  Checking system requirements...${NC}"
+# ====== DEPENDENCIES ======
+check_dependencies() {
+    for dep in jq curl; do
+        if ! command -v $dep >/dev/null; then
+            echo -e "${RED}❌ Missing $dep. Install it first.${NC}"
+            exit 1
+        fi
+    done
+}
 
-# Check dependencies
-if ! command -v curl >/dev/null 2>&1; then
-    echo -e "${RED}❌ curl is required but not installed.${NC}"
-    echo -e "${YELLOW}Install with: sudo apt install curl (Ubuntu/Debian) or brew install curl (macOS)${NC}"
+# ====== API CALL ======
+make_api_call() {
+    local url=$1
+    local response http_code
+    response=$(curl -s -w "HTTPSTATUS:%{http_code}" $COOKIE_HEADER "$url")
+    http_code=$(echo "$response" | sed -n 's/.*HTTPSTATUS://p')
+    response=$(echo "$response" | sed 's/HTTPSTATUS:.*//')
+
+    if [ "$http_code" -eq 200 ]; then
+        echo "$response"
+    elif [ "$http_code" -eq 403 ]; then
+        echo -e "${RED}❌ Cloudflare blocked request. Run --set-cookie${NC}"
+        exit 1
+    elif [ "$http_code" -eq 404 ]; then
+        echo -e "${YELLOW}⚠️ No data found${NC}"
+    else
+        echo -e "${RED}❌ API request failed ($http_code)${NC}"
+    fi
+}
+
+# ====== ARGUMENTS ======
+if [ $# -lt 1 ]; then
+    show_help
     exit 1
 fi
 
-if ! command -v jq >/dev/null 2>&1; then
-    echo -e "${YELLOW}⚠️  jq not found. Installing...${NC}"
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        sudo apt update && sudo apt install -y jq 2>/dev/null || {
-            echo -e "${RED}❌ Failed to install jq. Please install manually: sudo apt install jq${NC}"
+ADDRESS=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --set-cookie)
+            echo -n "Enter Cloudflare cookie: "
+            read -r COOKIE
+            echo "$COOKIE" > "$COOKIE_FILE"
+            echo -e "${GREEN}✅ Cookie saved${NC}"
+            exit 0
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        0x*)
+            ADDRESS=$1
+            shift
+            ;;
+        *)
+            echo -e "${RED}❌ Unknown option: $1${NC}"
+            show_help
             exit 1
-        }
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        brew install jq 2>/dev/null || {
-            echo -e "${RED}❌ Failed to install jq. Please install manually: brew install jq${NC}"
-            exit 1
-        }
-    else
-        echo -e "${RED}❌ Please install jq manually for your system${NC}"
-        exit 1
+            ;;
+    esac
+done
+
+validate_address "$ADDRESS"
+check_dependencies
+
+# ====== LOAD COOKIE ======
+COOKIE_HEADER=""
+if [ -f "$COOKIE_FILE" ]; then
+    COOKIE_HEADER="-H Cookie:$(cat "$COOKIE_FILE")"
+    echo -e "${GREEN}🍪 Using saved cookie${NC}"
+fi
+
+# ====== FETCH AND DISPLAY ======
+echo -e "${BOLD}${CYAN}🔍 Validator Stats for: ${YELLOW}$ADDRESS${NC}"
+
+# Performance
+perf=$(make_api_call "$BASE_URL/validators/$ADDRESS/performance")
+if [[ -n "$perf" ]]; then
+    total_att=$(echo "$perf" | jq -r '.totalAttestations // "N/A"')
+    missed_att=$(echo "$perf" | jq -r '.missedAttestations // "N/A"')
+    total_prop=$(echo "$perf" | jq -r '.totalProposals // "N/A"')
+    missed_prop=$(echo "$perf" | jq -r '.missedProposals // "N/A"')
+    success=$(echo "$perf" | jq -r '.successRate // "N/A"')
+    
+    echo -e "${GREEN}📈 Performance${NC}"
+    echo -e "   Attestations: $((total_att - missed_att))/$total_att"
+    echo -e "   Proposals: $((total_prop - missed_prop))/$total_prop"
+    echo -e "   Success Rate: $success%"
+    echo ""
+fi
+
+# Slashing
+slashing=$(make_api_call "$BASE_URL/validators/$ADDRESS/slashing")
+slash_count=$(echo "$slashing" | jq 'length' 2>/dev/null || echo 0)
+echo -e "${RED}🔨 Slashing Events${NC}"
+if [[ "$slash_count" == "0" ]]; then
+    echo -e "   ✅ Clean record"
+else
+    echo "$slashing" | jq -r '.[] | "   Epoch: \(.epoch) | Reason: \(.reason) | Amount: \(.amount)"'
+fi
+echo ""
+
+# Accusations
+acc=$(make_api_call "$BASE_URL/validators/$ADDRESS/accusations")
+acc_count=$(echo "$acc" | jq 'length' 2>/dev/null || echo 0)
+echo -e "${YELLOW}⚠️ Accusations${NC}"
+if [[ "$acc_count" == "0" ]]; then
+    echo -e "   ✅ Clean record"
+else
+    echo "$acc" | jq -r '.[] | "   Epoch: \(.epoch) | Type: \(.type) | Status: \(.status)"'
+fi
+echo ""
+
+# Committees
+comm=$(make_api_call "$BASE_URL/validators/$ADDRESS/committees")
+comm_count=$(echo "$comm" | jq 'length' 2>/dev/null || echo 0)
+echo -e "${GREEN}👥 Committee Participation${NC}"
+if [[ "$comm_count" == "0" ]]; then
+    echo -e "   ⚠️ No committee data"
+else
+    echo "$comm" | jq -r '.[] | "   Epoch: \(.epoch) | Role: \(.role) | Committee: \(.committee)"' | head -10
+    if [[ "$comm_count" -gt 10 ]]; then
+        echo -e "   ... and $((comm_count - 10)) more assignments"
     fi
 fi
 
-echo -e "${GREEN}✅ All dependencies satisfied${NC}"
-
-echo -e "${BLUE}ℹ️  Installing to: $INSTALL_DIR${NC}"
-echo -e "${BLUE}⬇️  Downloading latest script...${NC}"
-
-# Download with better error handling
-if curl -sSL -f "$SCRIPT_URL" -o "$INSTALL_DIR/$SCRIPT_NAME"; then
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-    echo -e "${GREEN}✅ Download successful${NC}"
-else
-    echo -e "${RED}❌ Failed to download script. Check your internet connection.${NC}"
-    exit 1
-fi
-
-# Add to PATH for current session and permanently
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    export PATH="$INSTALL_DIR:$PATH"
-    
-    # Add to shell config files
-    for config_file in ~/.bashrc ~/.zshrc ~/.profile; do
-        if [[ -f "$config_file" ]] && ! grep -q "$INSTALL_DIR" "$config_file"; then
-            echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$config_file"
-            echo -e "${GREEN}✅ Added to $config_file${NC}"
-        fi
-    done
-fi
-
-echo ""
-echo -e "${GREEN}🎉 Installation completed successfully!${NC}"
-echo ""
-echo -e "${CYAN}📖 Usage Examples:${NC}"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS${NC}                          # Basic stats"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --last 120${NC}               # Last 120 epochs"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --epochs 1797:1897${NC}       # Specific range"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --set-cookie${NC}             # Set Cloudflare cookie"
-echo ""
-echo -e "${BLUE}💡 Tip: If Cloudflare blocks requests, set your cookie once:${NC}"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --set-cookie${NC}"
-echo ""
-echo -e "${GREEN}🔄 Restart your terminal or run: source ~/.bashrc${NC}"
+echo -e "${BOLD}${GREEN}✅ Done${NC}"

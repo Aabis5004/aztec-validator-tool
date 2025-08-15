@@ -1,78 +1,71 @@
 #!/bin/bash
 set -e
 
-# Colors for highlights
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# Colors
+BOLD="\033[1m"
+GREEN="\033[32m"
+CYAN="\033[36m"
+YELLOW="\033[33m"
+RED="\033[31m"
+NC="\033[0m"
 
-ADDRESS_FILE="$HOME/.aztec_validator_address"
-API_BASE="https://dashtec.xyz/api"
-
-# Get stored address or prompt
-if [[ -f "$ADDRESS_FILE" ]]; then
-    ADDRESS=$(cat "$ADDRESS_FILE")
-else
-    read -p "Enter your validator address: " ADDRESS
-    echo "$ADDRESS" > "$ADDRESS_FILE"
-fi
-
-echo -e "${CYAN}🔍 Fetching latest epoch info...${NC}"
-LATEST_EPOCH=$(curl -s "$API_BASE/stats/general" | jq -r '.latestEpoch')
-START_EPOCH=$((LATEST_EPOCH - 100))  # last 100 epochs
-END_EPOCH=$LATEST_EPOCH
-
-GENERAL=$(curl -s "$API_BASE/stats/general")
-
-ACTIVE_VALIDATORS=$(echo "$GENERAL" | jq -r '.activeValidators')
-TOTAL_VALIDATORS=$(echo "$GENERAL" | jq -r '.totalValidators')
-
-echo -e "\n${CYAN}📡 Fetching validator stats for $ADDRESS...${NC}"
-STATS=$(curl -s "$API_BASE/dashboard/top-validators?startEpoch=$START_EPOCH&endEpoch=$END_EPOCH")
-VALIDATOR=$(echo "$STATS" | jq --arg addr "$ADDRESS" '.[] | select(.validatorAddress == $addr)')
-
-if [[ -z "$VALIDATOR" ]]; then
-    echo -e "${RED}❌ Validator not found in the top list.${NC}"
+if [ $# -lt 1 ]; then
+    echo "Usage: aztec-stats <validator_address> [--epochs start:end] [--last N] [--set-cookie]"
     exit 1
 fi
 
-# Basic info
-echo ""
-echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
-echo -e " Validator Address: ${YELLOW}$ADDRESS${NC}"
-echo -e " Active Validators: ${GREEN}$ACTIVE_VALIDATORS${NC} / $TOTAL_VALIDATORS"
-echo -e " Latest Epoch: ${YELLOW}$LATEST_EPOCH${NC}"
-echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+ADDRESS=$1
+shift
 
-# Rewards and attestations
-REWARDS=$(echo "$VALIDATOR" | jq -r '.totalRewards')
-ATTESTATIONS=$(echo "$VALIDATOR" | jq -r '.totalAttestations')
-COMMITTEE_PARTICIPATION=$(echo "$VALIDATOR" | jq -r '.committeeParticipationRate')
+# Default API URLs
+BASE_URL="https://api.mainnet.aztec.network"
+EPOCHS_PARAM=""
+COOKIE_FILE="$HOME/.aztec_cookie"
 
-echo -e "✅ Total Rewards: ${GREEN}$REWARDS${NC}"
-echo -e "📝 Total Attestations: ${GREEN}$ATTESTATIONS${NC}"
-echo -e "📊 Committee Participation: ${YELLOW}$COMMITTEE_PARTICIPATION%${NC}"
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --epochs)
+            EPOCHS_PARAM="&epochs=$2"
+            shift 2
+            ;;
+        --last)
+            EPOCHS_PARAM="&last=$2"
+            shift 2
+            ;;
+        --set-cookie)
+            echo -n "Enter Cloudflare cookie value: "
+            read COOKIE
+            echo "$COOKIE" > "$COOKIE_FILE"
+            echo "✅ Cookie saved to $COOKIE_FILE"
+            exit 0
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
-# Slashing & accusations
-echo -e "\n${CYAN}⚠ Checking for slashing events...${NC}"
-SLASHING=$(curl -s "$API_BASE/validators/slashing-history/$ADDRESS")
-if [[ "$SLASHING" == "[]" || -z "$SLASHING" ]]; then
-    echo -e " No slashing history ${GREEN}✅${NC}"
-else
-    echo -e "${RED} Slashing history detected:${NC}"
-    echo "$SLASHING" | jq -r '.[] | "- Epoch: \(.epoch), Reason: \(.reason)"'
+# Load cookie if exists
+COOKIE_HEADER=""
+if [ -f "$COOKIE_FILE" ]; then
+    COOKIE_HEADER="-H Cookie:$(cat $COOKIE_FILE)"
 fi
 
-echo -e "\n${CYAN}⚠ Checking for accusations...${NC}"
-ACCUSATIONS=$(curl -s "$API_BASE/validators/accusations/$ADDRESS")
-if [[ "$ACCUSATIONS" == "[]" || -z "$ACCUSATIONS" ]]; then
-    echo -e " No accusations ${GREEN}✅${NC}"
-else
-    echo -e "${RED} Accusations detected:${NC}"
-    echo "$ACCUSATIONS" | jq -r '.[] | "- Epoch: \(.epoch), Accuser: \(.accuser)"'
-fi
+echo -e "${BOLD}${CYAN}Fetching validator stats for:$NC $ADDRESS${NC}"
 
-echo -e "\n${CYAN}══════════════════════════════════════════════════${NC}"
-echo -e " ${GREEN}✅ Stats fetched successfully!${NC}"
+# Validator performance
+echo -e "\n${BOLD}📊 Performance Stats:${NC}"
+curl -s $COOKIE_HEADER "$BASE_URL/validators/$ADDRESS/performance?${EPOCHS_PARAM}" | jq .
+
+# Accusations
+echo -e "\n${BOLD}${YELLOW}⚠ Accusations:${NC}"
+curl -s $COOKIE_HEADER "$BASE_URL/validators/$ADDRESS/accusations" | jq .
+
+# Slashing
+echo -e "\n${BOLD}${RED}🔨 Slashing Events:${NC}"
+curl -s $COOKIE_HEADER "$BASE_URL/validators/$ADDRESS/slashing" | jq .
+
+# Committee participation
+echo -e "\n${BOLD}${GREEN}👥 Committee Participation:${NC}"
+curl -s $COOKIE_HEADER "$BASE_URL/validators/$ADDRESS/committees" | jq .

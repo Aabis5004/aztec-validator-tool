@@ -1,10 +1,12 @@
-# 🚀 Aztec Validator Stats Tool
+# Aztec Validator Stats Tool
 
-One-click tool to check your Aztec validator performance and statistics.
+This tool shows your **Aztec validator performance** – how many attestations you’ve done, block proposals, and success rate.
 
-## ⚡ Quick Install
+---
 
-**Copy and paste this command:**
+## Install
+
+Copy and paste this command in your terminal:
 
 ```bash
-curl -s https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/install.sh | bash
+bash <(curl -s https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/install.sh)

@@ -1,139 +1,83 @@
-#!/bin/bash
-# Aztec Validator Tool - One-Click Installer (WSL/Linux/macOS)
-# Author: Aabis Lone
-
-set -euo pipefail
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info(){ echo -e "${BLUE}ℹ${NC} $*"; }
 ok(){ echo -e "${GREEN}✓${NC} $*"; }
-err(){ echo -e "${RED}✗${NC} $*"; }
 warn(){ echo -e "${YELLOW}⚠${NC} $*"; }
+err(){ echo -e "${RED}✗${NC} $*"; }
 
 detect_os() {
-  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  if [[ "${OSTYPE:-}" == linux-gnu* ]]; then
     if grep -qi microsoft /proc/version 2>/dev/null; then OS="wsl"; else OS="linux"; fi
-  elif [[ "$OSTYPE" == "darwin"* ]]; then
-    OS="mac"
-  else
-    OS="unknown"
-  fi
+  elif [[ "${OSTYPE:-}" == darwin* ]]; then OS="mac"; else OS="unknown"; fi
 }
-
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 install_deps() {
   local missing=()
-  for c in curl jq bc timeout; do need_cmd "$c" || missing+=("$c"); done
-
-  if ((${#missing[@]})); then
-    warn "Installing missing dependencies: ${missing[*]}"
-    case "$OS" in
-      wsl|linux)
-        info "Updating package list..."
-        sudo apt update
-        # timeout is in coreutils; most systems have it
-        sudo apt install -y curl jq bc coreutils ca-certificates
-        sudo update-ca-certificates || true
-        ;;
-      mac)
-        if need_cmd brew; then
-          brew install curl jq bc coreutils
-        else
-          err "Homebrew not found. Install from https://brew.sh"
-          exit 1
-        fi
-        ;;
-      *)
-        err "Unsupported OS: $OSTYPE"
-        exit 1
-        ;;
-    esac
-    ok "Dependencies installed."
-  else
-    ok "All dependencies already installed!"
-  fi
+  for b in curl jq bc; do command -v "$b" >/dev/null 2>&1 || missing+=("$b"); done
+  [[ ${#missing[@]} -eq 0 ]] && return 0
+  warn "Installing dependencies: ${missing[*]}"
+  case "${OS}" in
+    wsl|linux) sudo apt update && sudo apt install -y "${missing[@]}" ;;
+    mac) command -v brew >/dev/null || { err "Install Homebrew: https://brew.sh"; exit 1; }; brew install "${missing[@]}" ;;
+    *) err "Unsupported OS: ${OSTYPE:-unknown}"; exit 1 ;;
+  esac
+  ok "Dependencies installed"
 }
 
 main() {
-  clear
+  clear || true
   echo "╔══════════════════════════════════════════════════════════════╗"
   echo "║            AZTEC VALIDATOR TOOL INSTALLER                   ║"
-  echo "║                       One-Click Setup                       ║"
-  echo "║                       by Aabis Lone                         ║"
+  echo "║                   One-Click Setup                           ║"
+  echo "║                   by Aabis Lone                             ║"
   echo "╚══════════════════════════════════════════════════════════════╝"
-  echo
+  echo ""
 
   detect_os
   info "Detected OS: ${OS}"
-
-  info "Checking dependencies..."
+  info "Checking dependencies…"
   install_deps
-  echo
+  echo ""
 
-  # ---- Settings ----
-  local INSTALL_DIR="$HOME/aztec-validator-tool"
-  local REPO="Aabis5004/aztec-validator-tool"
-  local RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
-  local SCRIPT_FILE="validator-stats.sh"
-  local WRAPPER_DIR="$HOME/.local/bin"
-  local WRAPPER="$WRAPPER_DIR/aztec-stats"
-  # ------------------
-
+  INSTALL_DIR="${HOME}/aztec-validator-tool"
   info "Creating installation directory: $INSTALL_DIR"
-  if [[ -d "$INSTALL_DIR" ]]; then
-    warn "Found existing installation. Updating..."
-    rm -rf "$INSTALL_DIR"
-  fi
+  rm -rf "$INSTALL_DIR"
   mkdir -p "$INSTALL_DIR"
+  cd "$INSTALL_DIR"
 
-  info "Downloading validator stats script..."
-  info "URL: ${RAW_BASE}/${SCRIPT_FILE}"
-  if ! curl -fSL "${RAW_BASE}/${SCRIPT_FILE}" -o "${INSTALL_DIR}/${SCRIPT_FILE}"; then
-    err "Failed to download script from GitHub"
-    echo "Please check:"
-    echo "  • Internet connection"
-    echo "  • Repo is public"
-    echo "  • File exists at: ${RAW_BASE}/${SCRIPT_FILE}"
-    exit 1
-  fi
-  chmod +x "${INSTALL_DIR}/${SCRIPT_FILE}"
+  info "Downloading validator stats script…"
+  GITHUB_URL="https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/validator-stats.sh"
+  curl -sSfL "$GITHUB_URL" -o validator-stats.sh || { err "Download failed"; exit 1; }
+  chmod +x validator-stats.sh
 
-  info "Installing wrapper command: aztec-stats"
-  mkdir -p "$WRAPPER_DIR"
-  cat > "$WRAPPER" <<EOF
-#!/bin/bash
-exec "$INSTALL_DIR/$SCRIPT_FILE" "\$@"
+  # Global wrapper
+  mkdir -p "${HOME}/.local/bin"
+  cat > "${HOME}/.local/bin/aztec-stats" <<'EOF'
+#!/usr/bin/env bash
+exec "$HOME/aztec-validator-tool/validator-stats.sh" "$@"
 EOF
-  chmod +x "$WRAPPER"
+  chmod +x "${HOME}/.local/bin/aztec-stats"
 
-  # Ensure ~/.local/bin is on PATH for current shell (no .bashrc edits needed)
-  if [[ ":$PATH:" != *":$WRAPPER_DIR:"* ]]; then
-    warn "~/.local/bin is not on PATH for this session."
-    echo "You can run with full path: $WRAPPER"
-    echo "Or add to PATH temporarily: export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo "Or restart your terminal."
+  # Ensure PATH
+  if ! grep -q '\.local/bin' "${HOME}/.bashrc" 2>/dev/null; then
+    {
+      echo ""
+      echo "# Aztec Validator Tool"
+      echo 'export PATH="$HOME/.local/bin:$PATH"'
+    } >> "${HOME}/.bashrc"
+    info "Added ~/.local/bin to PATH. Run: source ~/.bashrc"
   fi
 
   ok "Installation complete!"
-  echo
-  echo "╔══════════════════════════════════════════════════════════════╗"
-  echo "║                       HOW TO USE                            ║"
-  echo "╚══════════════════════════════════════════════════════════════╝"
-  echo
-  echo "📍 Installation path: $INSTALL_DIR"
-  echo
-  echo "🎯 Method 1 - Global command:"
-  echo "   aztec-stats <validator_address>"
-  echo
-  echo "🎯 Method 2 - Direct:"
-  echo "   $INSTALL_DIR/$SCRIPT_FILE <validator_address>"
-  echo
-  echo "📝 Example:"
-  echo "   aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3"
-  echo
-  echo "🆘 Repo: https://github.com/$REPO"
-  echo
+  echo ""
+  echo "How to run:"
+  echo "  aztec-stats 0xYOUR_ADDRESS --epochs 1797:1897"
+  echo "  aztec-stats 0xYOUR_ADDRESS --last 120 --set-cookie"
+  echo ""
+  echo "If Cloudflare blocks requests, set your cookie once:"
+  echo "  aztec-stats 0xYOUR_ADDRESS --set-cookie"
 }
 
 main "$@"

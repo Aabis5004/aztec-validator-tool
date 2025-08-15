@@ -1,194 +1,139 @@
 #!/bin/bash
-
-# Aztec Validator Stats Tool - WSL Optimized
+# Aztec Validator Tool - One-Click Installer (WSL/Linux/macOS)
 # Author: Aabis Lone
 
-set -e
+set -euo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info(){ echo -e "${BLUE}ℹ${NC} $*"; }
+ok(){ echo -e "${GREEN}✓${NC} $*"; }
+err(){ echo -e "${RED}✗${NC} $*"; }
+warn(){ echo -e "${YELLOW}⚠${NC} $*"; }
 
-print_info() { echo -e "${BLUE}ℹ${NC} $1"; }
-print_success() { echo -e "${GREEN}✓${NC} $1"; }
-print_error() { echo -e "${RED}✗${NC} $1"; }
-print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+detect_os() {
+  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    if grep -qi microsoft /proc/version 2>/dev/null; then OS="wsl"; else OS="linux"; fi
+  elif [[ "$OSTYPE" == "darwin"* ]]; then
+    OS="mac"
+  else
+    OS="unknown"
+  fi
+}
 
-# WSL-specific dependency check
-check_dependencies() {
-    local missing_deps=()
-    
-    if ! command -v curl &> /dev/null; then
-        missing_deps+=("curl")
-    fi
-    
-    if ! command -v jq &> /dev/null; then
-        missing_deps+=("jq")
-    fi
-    
-    if ! command -v bc &> /dev/null; then
-        missing_deps+=("bc")
-    fi
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        print_warning "Installing missing dependencies: ${missing_deps[*]}"
-        print_info "This requires sudo access..."
-        
-        # Update package list first
+need_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+install_deps() {
+  local missing=()
+  for c in curl jq bc timeout; do need_cmd "$c" || missing+=("$c"); done
+
+  if ((${#missing[@]})); then
+    warn "Installing missing dependencies: ${missing[*]}"
+    case "$OS" in
+      wsl|linux)
+        info "Updating package list..."
         sudo apt update
-        
-        # Install missing dependencies
-        sudo apt install -y "${missing_deps[@]}"
-        
-        print_success "Dependencies installed successfully!"
-    fi
+        # timeout is in coreutils; most systems have it
+        sudo apt install -y curl jq bc coreutils ca-certificates
+        sudo update-ca-certificates || true
+        ;;
+      mac)
+        if need_cmd brew; then
+          brew install curl jq bc coreutils
+        else
+          err "Homebrew not found. Install from https://brew.sh"
+          exit 1
+        fi
+        ;;
+      *)
+        err "Unsupported OS: $OSTYPE"
+        exit 1
+        ;;
+    esac
+    ok "Dependencies installed."
+  else
+    ok "All dependencies already installed!"
+  fi
 }
 
 main() {
-    # Clear screen and show header
-    clear
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                  AZTEC VALIDATOR STATS TOOL                 ║"
-    echo "║                     WSL Edition                              ║"
-    echo "║                     by Aabis Lone                           ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    
-    # Check arguments
-    if [ $# -eq 0 ]; then
-        print_error "Usage: $0 <validator_address>"
-        print_info "Example: $0 0x581f8afba0ba7aa93c662e730559b63479ba70e3"
-        echo ""
-        print_info "This tool fetches:"
-        echo "  • Total attestations and success rate"
-        echo "  • Block proposals and mining stats"
-        echo "  • Performance analysis with ratings"
-        exit 1
-    fi
+  clear
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║            AZTEC VALIDATOR TOOL INSTALLER                   ║"
+  echo "║                       One-Click Setup                       ║"
+  echo "║                       by Aabis Lone                         ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  echo
 
-    VALIDATOR_ADDR="$1"
+  detect_os
+  info "Detected OS: ${OS}"
 
-    # Validate address
-    if [[ ! "$VALIDATOR_ADDR" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-        print_error "Invalid validator address format!"
-        print_info "Must be: 0x + 40 hexadecimal characters"
-        exit 1
-    fi
+  info "Checking dependencies..."
+  install_deps
+  echo
 
-    # Install dependencies if needed
-    check_dependencies
+  # ---- Settings ----
+  local INSTALL_DIR="$HOME/aztec-validator-tool"
+  local REPO="Aabis5004/aztec-validator-tool"
+  local RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
+  local SCRIPT_FILE="validator-stats.sh"
+  local WRAPPER_DIR="$HOME/.local/bin"
+  local WRAPPER="$WRAPPER_DIR/aztec-stats"
+  # ------------------
 
-    print_info "Fetching validator stats for: $VALIDATOR_ADDR"
-    echo ""
+  info "Creating installation directory: $INSTALL_DIR"
+  if [[ -d "$INSTALL_DIR" ]]; then
+    warn "Found existing installation. Updating..."
+    rm -rf "$INSTALL_DIR"
+  fi
+  mkdir -p "$INSTALL_DIR"
 
-    # API call
-    API_URL="https://dashtec.xyz/api/validators/${VALIDATOR_ADDR}"
-    TEMP_FILE=$(mktemp)
+  info "Downloading validator stats script..."
+  info "URL: ${RAW_BASE}/${SCRIPT_FILE}"
+  if ! curl -fSL "${RAW_BASE}/${SCRIPT_FILE}" -o "${INSTALL_DIR}/${SCRIPT_FILE}"; then
+    err "Failed to download script from GitHub"
+    echo "Please check:"
+    echo "  • Internet connection"
+    echo "  • Repo is public"
+    echo "  • File exists at: ${RAW_BASE}/${SCRIPT_FILE}"
+    exit 1
+  fi
+  chmod +x "${INSTALL_DIR}/${SCRIPT_FILE}"
 
-    # Fetch data with timeout
-    if ! timeout 30 curl -s \
-         -H "Accept: application/json" \
-         -H "User-Agent: Mozilla/5.0 (WSL; Aztec Validator Tool)" \
-         "$API_URL" -o "$TEMP_FILE"; then
-        print_error "Failed to fetch data from API"
-        print_info "Check your internet connection"
-        rm -f "$TEMP_FILE"
-        exit 1
-    fi
+  info "Installing wrapper command: aztec-stats"
+  mkdir -p "$WRAPPER_DIR"
+  cat > "$WRAPPER" <<EOF
+#!/bin/bash
+exec "$INSTALL_DIR/$SCRIPT_FILE" "\$@"
+EOF
+  chmod +x "$WRAPPER"
 
-    # Validate JSON response
-    if ! jq empty "$TEMP_FILE" 2>/dev/null; then
-        print_error "Invalid API response"
-        print_warning "This might be due to:"
-        echo "  • Rate limiting"
-        echo "  • Invalid validator address"
-        echo "  • API server issues"
-        rm -f "$TEMP_FILE"
-        exit 1
-    fi
+  # Ensure ~/.local/bin is on PATH for current shell (no .bashrc edits needed)
+  if [[ ":$PATH:" != *":$WRAPPER_DIR:"* ]]; then
+    warn "~/.local/bin is not on PATH for this session."
+    echo "You can run with full path: $WRAPPER"
+    echo "Or add to PATH temporarily: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo "Or restart your terminal."
+  fi
 
-    # Parse JSON data
-    ADDRESS=$(jq -r '.address // "N/A"' "$TEMP_FILE")
-    STATUS=$(jq -r '.status // "N/A"' "$TEMP_FILE")
-    ATTESTATION_SUCCESS=$(jq -r '.attestationSuccess // "N/A"' "$TEMP_FILE")
-    ATTESTATIONS_SUCCEEDED=$(jq -r '.totalAttestationsSucceeded // 0' "$TEMP_FILE")
-    ATTESTATIONS_MISSED=$(jq -r '.totalAttestationsMissed // 0' "$TEMP_FILE")
-    BLOCKS_PROPOSED=$(jq -r '.totalBlocksProposed // 0' "$TEMP_FILE")
-    BLOCKS_MINED=$(jq -r '.totalBlocksMined // 0' "$TEMP_FILE")
-    BLOCKS_MISSED=$(jq -r '.totalBlocksMissed // 0' "$TEMP_FILE")
-
-    TOTAL_ATTESTATIONS=$((ATTESTATIONS_SUCCEEDED + ATTESTATIONS_MISSED))
-
-    # Display comprehensive stats
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                        VALIDATOR INFO                        ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    printf "%-20s %s\n" "Address:" "$ADDRESS"
-    printf "%-20s %s\n" "Status:" "$STATUS"
-    printf "%-20s %s\n" "Success Rate:" "$ATTESTATION_SUCCESS"
-
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                      ATTESTATION STATS                      ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    printf "%-20s %s\n" "Total Attestations:" "$TOTAL_ATTESTATIONS"
-    printf "%-20s %s\n" "  └─ Succeeded:" "$ATTESTATIONS_SUCCEEDED"
-    printf "%-20s %s\n" "  └─ Missed:" "$ATTESTATIONS_MISSED"
-
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                        BLOCK STATS                          ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    printf "%-20s %s\n" "Blocks Proposed:" "$BLOCKS_PROPOSED"
-    printf "%-20s %s\n" "Blocks Mined:" "$BLOCKS_MINED"
-    printf "%-20s %s\n" "Blocks Missed:" "$BLOCKS_MISSED"
-
-    # Performance Analysis
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                    PERFORMANCE ANALYSIS                     ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-
-    if [[ "$TOTAL_ATTESTATIONS" -gt 0 ]]; then
-        SUCCESS_RATE=$(echo "scale=1; $ATTESTATIONS_SUCCEEDED * 100 / $TOTAL_ATTESTATIONS" | bc)
-        printf "Attestation Success: %.1f%% (%d/%d)\n" "$SUCCESS_RATE" "$ATTESTATIONS_SUCCEEDED" "$TOTAL_ATTESTATIONS"
-        
-        # Performance rating with emojis
-        if (( $(echo "$SUCCESS_RATE >= 99" | bc -l) )); then
-            echo "Rating: 🟢 EXCELLENT - Top performer!"
-        elif (( $(echo "$SUCCESS_RATE >= 95" | bc -l) )); then
-            echo "Rating: 🟡 GOOD - Solid performance"
-        elif (( $(echo "$SUCCESS_RATE >= 90" | bc -l) )); then
-            echo "Rating: 🟠 FAIR - Room for improvement"
-        else
-            echo "Rating: 🔴 NEEDS IMPROVEMENT - Check validator setup"
-        fi
-    else
-        echo "No attestation data available yet"
-    fi
-
-    if [[ "$BLOCKS_PROPOSED" -gt 0 ]]; then
-        BLOCK_RATE=$(echo "scale=1; $BLOCKS_MINED * 100 / $BLOCKS_PROPOSED" | bc)
-        printf "Block Success: %.1f%% (%d/%d)\n" "$BLOCK_RATE" "$BLOCKS_MINED" "$BLOCKS_PROPOSED"
-    fi
-
-    echo ""
-    echo "╚══════════════════════════════════════════════════════════════╝"
-
-    # Cleanup
-    rm -f "$TEMP_FILE"
-    
-    echo ""
-    print_success "Stats retrieved successfully!"
-    print_info "Data source: dashtec.xyz API"
-    echo ""
+  ok "Installation complete!"
+  echo
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║                       HOW TO USE                            ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  echo
+  echo "📍 Installation path: $INSTALL_DIR"
+  echo
+  echo "🎯 Method 1 - Global command:"
+  echo "   aztec-stats <validator_address>"
+  echo
+  echo "🎯 Method 2 - Direct:"
+  echo "   $INSTALL_DIR/$SCRIPT_FILE <validator_address>"
+  echo
+  echo "📝 Example:"
+  echo "   aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3"
+  echo
+  echo "🆘 Repo: https://github.com/$REPO"
+  echo
 }
 
-# Run main function
 main "$@"

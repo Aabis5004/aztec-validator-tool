@@ -50,6 +50,16 @@ if ! command -v jq >/dev/null 2>&1; then
     fi
 fi
 
+# Check for bc (basic calculator) for percentage calculations
+if ! command -v bc >/dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  bc not found. Installing...${NC}"
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        sudo apt install -y bc 2>/dev/null || {
+            echo -e "${YELLOW}⚠️  bc installation failed, but tool will still work${NC}"
+        }
+    fi
+fi
+
 echo -e "${GREEN}✅ All dependencies satisfied${NC}"
 
 echo -e "${BLUE}ℹ️  Installing to: $INSTALL_DIR${NC}"
@@ -81,12 +91,18 @@ echo ""
 echo -e "${GREEN}🎉 Installation completed successfully!${NC}"
 echo ""
 echo -e "${CYAN}📖 Usage Examples:${NC}"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS${NC}                          # Basic stats"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --last 120${NC}               # Last 120 epochs"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --epochs 1797:1897${NC}       # Specific range"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --set-cookie${NC}             # Set Cloudflare cookie"
+echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS${NC}                    # Latest performance summary"
+echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --last 200${NC}         # Last 200 epochs analysis" 
+echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --set-cookie${NC}       # Setup Cloudflare bypass"
 echo ""
-echo -e "${BLUE}💡 Tip: If Cloudflare blocks requests, set your cookie once:${NC}"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_ADDRESS --set-cookie${NC}"
+echo -e "${BLUE}📊 Shows method-wise breakdown:${NC}"
+echo -e "${GREEN}   ✅ Attestations (total, successful, missed, rates)${NC}"
+echo -e "${BLUE}   📋 Block Proposals (total, successful, missed, rates)${NC}"
+echo -e "${RED}   🔨 Slashing Events (if any)${NC}"
+echo -e "${YELLOW}   ⚠️  Accusations (if any)${NC}"
+echo -e "${GREEN}   👥 Committee Participation${NC}"
+echo ""
+echo -e "${BLUE}💡 If Cloudflare blocks requests:${NC}"
+echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --set-cookie${NC}"
 echo ""
 echo -e "${GREEN}🔄 Restart your terminal or run: source ~/.bashrc${NC}"

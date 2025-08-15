@@ -1,46 +1,32 @@
 #!/bin/bash
 set -e
 
-echo "═══════════════════════════════════════════════════════"
-echo "║            AZTEC VALIDATOR TOOL INSTALLER           ║"
-echo "║                   One-Click Setup                   ║"
-echo "║                   by Aabis Lone                     ║"
-echo "═══════════════════════════════════════════════════════"
-echo ""
+echo "🔧 Installing Aztec Validator Stats Tool..."
 
-# Detect OS type
-OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
-echo "ℹ Detected OS: $OS_TYPE"
-echo "ℹ Checking dependencies…"
+# Choose install dir
+if [ -w /usr/local/bin ]; then
+    INSTALL_DIR="/usr/local/bin"
+else
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+    export PATH="$INSTALL_DIR:$PATH"
+fi
 
-# Ensure required tools are installed
-for cmd in curl jq; do
-    if ! command -v $cmd &>/dev/null; then
-        echo "❌ Missing dependency: $cmd"
-        echo "   Please install it first."
-        exit 1
-    fi
-done
-
-# Installation path in user's bin directory
-INSTALL_DIR="$HOME/.local/bin"
-SCRIPT_NAME="aztec-stats"
+# Download the latest script
 SCRIPT_URL="https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/validator-stats.sh"
+SCRIPT_NAME="aztec-stats"
 
-# Create bin directory if missing
-mkdir -p "$INSTALL_DIR"
-
-echo "ℹ Downloading validator stats script…"
+echo "⬇ Downloading script..."
 curl -s -o "$INSTALL_DIR/$SCRIPT_NAME" "$SCRIPT_URL"
 chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
-# Make sure ~/.local/bin is in PATH
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo "export PATH=\$HOME/.local/bin:\$PATH" >> ~/.bashrc
-    export PATH="$HOME/.local/bin:$PATH"
+# If ~/.local/bin was used, make sure it's in PATH permanently
+if [[ "$INSTALL_DIR" == "$HOME/.local/bin" ]]; then
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    fi
 fi
 
-echo "✓ Installation complete!"
+echo "✅ Installation complete!"
 echo ""
-echo "How to run:"
-echo "  aztec-stats"
+echo "Run: aztec-stats"

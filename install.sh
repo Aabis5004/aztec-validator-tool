@@ -1,128 +1,397 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# Enhanced Aztec Validator Tool Installer
+# Author: Aabis Lone
+# Cross-platform installer with proper directory handling
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+set -Eeuo pipefail
 
-echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║            AZTEC VALIDATOR TOOL INSTALLER                   ║${NC}"
-echo -e "${CYAN}║                   One-Click Setup                           ║${NC}"
-echo -e "${CYAN}║                   by Aabis Lone                             ║${NC}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
+# Colors and styling
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly BLUE='\033[0;34m'
+readonly YELLOW='\033[1;33m'
+readonly CYAN='\033[0;36m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m'
 
-# Universal install directory (works for all users)
-INSTALL_DIR="$HOME/.local/bin"
-SCRIPT_NAME="aztec-stats"
-SCRIPT_URL="https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/validator-stats.sh"
+# Logging functions
+info() { echo -e "${BLUE}ℹ${NC} $*"; }
+success() { echo -e "${GREEN}✓${NC} $*"; }
+error() { echo -e "${RED}✗${NC} $*" >&2; }
+warn() { echo -e "${YELLOW}⚠${NC} $*"; }
+highlight() { echo -e "${BOLD}$*${NC}"; }
 
-# Create install directory
-mkdir -p "$INSTALL_DIR"
+# Configuration
+readonly REPO_URL="https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main"
+readonly SCRIPT_NAME="validator-stats.sh"
+readonly COMMAND_NAME="aztec-stats"
 
-echo -e "${BLUE}ℹ️  Checking system requirements...${NC}"
+# Installation paths
+readonly INSTALL_DIR="${HOME}/.local/share/aztec-validator-tool"
+readonly BIN_DIR="${HOME}/.local/bin"
+readonly CONFIG_DIR="${HOME}/.config/aztec-validator"
+readonly CACHE_DIR="${HOME}/.cache/aztec-validator"
 
-# Check dependencies
-missing_deps=()
-for dep in curl jq bc; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
-        missing_deps+=("$dep")
-    fi
-done
-
-if [ ${#missing_deps[@]} -ne 0 ]; then
-    echo -e "${YELLOW}⚠️  Installing missing dependencies: ${missing_deps[*]}${NC}"
+# Error handling
+cleanup_and_exit() {
+    local exit_code=${1:-0}
+    local message=${2:-""}
     
-    # Detect OS and install
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        # Check if it's WSL or regular Linux
-        if grep -qi microsoft /proc/version 2>/dev/null; then
-            echo -e "${BLUE}ℹ️  Detected WSL environment${NC}"
-        fi
-        
-        # Try to install without sudo first (for restricted environments)
-        if ! sudo apt update && sudo apt install -y "${missing_deps[@]}" 2>/dev/null; then
-            echo -e "${RED}❌ Failed to install dependencies automatically${NC}"
-            echo -e "${YELLOW}Please install manually: sudo apt install ${missing_deps[*]}${NC}"
-            exit 1
-        fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        if ! command -v brew >/dev/null 2>&1; then
-            echo -e "${RED}❌ Homebrew required. Install from: https://brew.sh${NC}"
-            exit 1
-        fi
-        brew install "${missing_deps[@]}"
+    [[ -n "$message" ]] && error "$message"
+    exit "$exit_code"
+}
+
+trap 'cleanup_and_exit 1 "Installation failed unexpectedly"' ERR
+
+# OS Detection
+detect_os() {
+    case "${OSTYPE:-}" in
+        linux-gnu*)
+            if grep -qi microsoft /proc/version 2>/dev/null; then
+                echo "wsl"
+            elif grep -qi ubuntu /proc/version 2>/dev/null; then
+                echo "ubuntu"
+            else
+                echo "linux"
+            fi
+            ;;
+        darwin*) echo "macos" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# Package manager detection
+detect_package_manager() {
+    if command -v apt >/dev/null 2>&1; then
+        echo "apt"
+    elif command -v yum >/dev/null 2>&1; then
+        echo "yum"
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "dnf"
+    elif command -v pacman >/dev/null 2>&1; then
+        echo "pacman"
+    elif command -v brew >/dev/null 2>&1; then
+        echo "brew"
     else
-        echo -e "${RED}❌ Unsupported OS. Please install manually: ${missing_deps[*]}${NC}"
-        exit 1
+        echo "unknown"
     fi
-fi
+}
 
-echo -e "${GREEN}✅ All dependencies satisfied${NC}"
+# Dependency management
+check_dependencies() {
+    local missing=()
+    local required_tools=("curl" "jq" "bc")
+    
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing+=("$tool")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        install_dependencies "${missing[@]}"
+    else
+        success "All dependencies are already installed"
+    fi
+}
 
-echo -e "${BLUE}ℹ️  Installing to: $INSTALL_DIR${NC}"
-echo -e "${BLUE}⬇️  Downloading latest script...${NC}"
+install_dependencies() {
+    local deps=("$@")
+    local pkg_manager
+    pkg_manager=$(detect_package_manager)
+    
+    info "Installing dependencies: ${deps[*]}"
+    
+    case "$pkg_manager" in
+        apt)
+            sudo apt update && sudo apt install -y "${deps[@]}"
+            ;;
+        yum)
+            sudo yum install -y "${deps[@]}"
+            ;;
+        dnf)
+            sudo dnf install -y "${deps[@]}"
+            ;;
+        pacman)
+            sudo pacman -S --noconfirm "${deps[@]}"
+            ;;
+        brew)
+            brew install "${deps[@]}"
+            ;;
+        *)
+            error "Unsupported package manager. Please install manually: ${deps[*]}"
+            echo "Required tools:"
+            echo "  - curl: for downloading files"
+            echo "  - jq: for JSON processing"
+            echo "  - bc: for mathematical calculations"
+            cleanup_and_exit 1
+            ;;
+    esac
+    
+    success "Dependencies installed successfully"
+}
 
-# Download with better error handling
-if curl -sSL -f --connect-timeout 10 --max-time 30 "$SCRIPT_URL" -o "$INSTALL_DIR/$SCRIPT_NAME"; then
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-    echo -e "${GREEN}✅ Download successful${NC}"
-else
-    echo -e "${RED}❌ Failed to download script. Please check:${NC}"
-    echo -e "${YELLOW}  - Internet connection${NC}"
-    echo -e "${YELLOW}  - GitHub repository access${NC}"
-    echo -e "${YELLOW}  - Try again in a few minutes${NC}"
+# Directory creation
+create_directories() {
+    local dirs=(
+        "$INSTALL_DIR"
+        "$BIN_DIR" 
+        "$CONFIG_DIR"
+        "$CACHE_DIR"
+    )
+    
+    for dir in "${dirs[@]}"; do
+        if mkdir -p "$dir"; then
+            info "Created directory: $dir"
+        else
+            error "Failed to create directory: $dir"
+            cleanup_and_exit 1
+        fi
+    done
+}
+
+# Download and install script
+download_script() {
+    local script_url="${REPO_URL}/${SCRIPT_NAME}"
+    local script_path="${INSTALL_DIR}/${SCRIPT_NAME}"
+    
+    info "Downloading validator stats script..."
+    
+    if curl -fsSL "$script_url" -o "$script_path"; then
+        chmod +x "$script_path"
+        success "Script downloaded and made executable"
+    else
+        error "Failed to download script from: $script_url"
+        cleanup_and_exit 1
+    fi
+}
+
+# Create wrapper script
+create_wrapper() {
+    local wrapper_path="${BIN_DIR}/${COMMAND_NAME}"
+    
+    info "Creating command wrapper..."
+    
+    cat > "$wrapper_path" <<EOF
+#!/usr/bin/env bash
+# Aztec Validator Tool Wrapper
+# This script ensures the tool runs from the correct location
+
+SCRIPT_DIR="\${HOME}/.local/share/aztec-validator-tool"
+SCRIPT_PATH="\${SCRIPT_DIR}/validator-stats.sh"
+
+if [[ ! -f "\$SCRIPT_PATH" ]]; then
+    echo "Error: Aztec validator tool not found at \$SCRIPT_PATH"
+    echo "Please reinstall using the installer script."
     exit 1
 fi
 
-# Smart PATH management - add to multiple shell configs
-PATH_ADDED=false
-for shell_config in ~/.bashrc ~/.zshrc ~/.profile ~/.bash_profile; do
-    if [[ -f "$shell_config" ]]; then
-        if ! grep -q "$INSTALL_DIR" "$shell_config" 2>/dev/null; then
-            echo "" >> "$shell_config"
-            echo "# Aztec Validator Tool - Added by installer" >> "$shell_config"
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_config"
-            echo -e "${GREEN}✅ Added to $shell_config${NC}"
-            PATH_ADDED=true
+# Execute the main script with all arguments
+exec "\$SCRIPT_PATH" "\$@"
+EOF
+    
+    chmod +x "$wrapper_path"
+    success "Command wrapper created: $wrapper_path"
+}
+
+# PATH management
+setup_path() {
+    local shell_configs=(
+        "${HOME}/.bashrc"
+        "${HOME}/.zshrc" 
+        "${HOME}/.profile"
+    )
+    
+    local path_line='export PATH="$HOME/.local/bin:$PATH"'
+    local added_to_config=0
+    
+    for config_file in "${shell_configs[@]}"; do
+        if [[ -f "$config_file" ]]; then
+            if ! grep -q "/.local/bin" "$config_file" 2>/dev/null; then
+                {
+                    echo ""
+                    echo "# Added by Aztec Validator Tool installer"
+                    echo "$path_line"
+                } >> "$config_file"
+                info "Added PATH to: $config_file"
+                added_to_config=1
+            fi
         fi
+    done
+    
+    if [[ $added_to_config -eq 0 ]]; then
+        # Create .profile if no config files exist
+        local profile_file="${HOME}/.profile"
+        {
+            echo "# Created by Aztec Validator Tool installer"
+            echo "$path_line"
+        } > "$profile_file"
+        info "Created $profile_file with PATH configuration"
     fi
-done
+    
+    # Add to current session
+    export PATH="$HOME/.local/bin:$PATH"
+}
 
-# Add to current session PATH
-if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-    export PATH="$INSTALL_DIR:$PATH"
-fi
+# Verification
+verify_installation() {
+    local wrapper_path="${BIN_DIR}/${COMMAND_NAME}"
+    local script_path="${INSTALL_DIR}/${SCRIPT_NAME}"
+    
+    if [[ -x "$wrapper_path" && -x "$script_path" ]]; then
+        success "Installation verification passed"
+        return 0
+    else
+        error "Installation verification failed"
+        [[ ! -x "$wrapper_path" ]] && error "Wrapper not executable: $wrapper_path"
+        [[ ! -x "$script_path" ]] && error "Script not executable: $script_path"
+        return 1
+    fi
+}
 
-echo ""
-echo -e "${GREEN}🎉 Installation completed successfully!${NC}"
-echo ""
-echo -e "${CYAN}📖 Usage Examples:${NC}"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS${NC}                    # Complete stats overview"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --epochs 1800:1900${NC} # Specific epoch range" 
-echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --last 120${NC}         # Last 120 epochs"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --set-cookie${NC}       # Setup Cloudflare bypass"
-echo ""
-echo -e "${BLUE}📊 Complete Stats Overview:${NC}"
-echo -e "${GREEN}   🌐 Network Stats (total validators, current epoch)${NC}"
-echo -e "${GREEN}   ✅ Attestation Performance (total, successful, missed, rates)${NC}"
-echo -e "${BLUE}   📋 Block Production (proposed, mined, missed, rates)${NC}"
-echo -e "${RED}   🔨 Slashing History (recent events, your validator impact)${NC}"
-echo -e "${YELLOW}   ⚠️  Accusations & Penalties${NC}"
-echo -e "${CYAN}   👥 Committee Participation${NC}"
-echo -e "${PURPLE}   🏆 Top Validators Ranking (when epoch range provided)${NC}"
-echo ""
-echo -e "${BLUE}💡 Cloudflare Protection:${NC}"
-echo -e "${YELLOW}  If requests get blocked, setup cookie once:${NC}"
-echo -e "${YELLOW}  aztec-stats 0xYOUR_VALIDATOR_ADDRESS --set-cookie${NC}"
-echo ""
-if [[ "$PATH_ADDED" == "true" ]]; then
-    echo -e "${GREEN}🔄 Restart your terminal or run: source ~/.bashrc${NC}"
-else
-    echo -e "${GREEN}✅ Tool is ready to use immediately!${NC}"
-fi
-echo -e "${BLUE}📁 Installation path: $INSTALL_DIR/$SCRIPT_NAME${NC}"
+# Cleanup old installations
+cleanup_old_installations() {
+    local old_dirs=(
+        "${HOME}/aztec-validator-tool"
+        "${HOME}/.aztec-validator-tool"
+    )
+    
+    for old_dir in "${old_dirs[@]}"; do
+        if [[ -d "$old_dir" ]]; then
+            info "Removing old installation: $old_dir"
+            rm -rf "$old_dir"
+        fi
+    done
+    
+    # Remove old config files
+    local old_configs=(
+        "${HOME}/.aztec-validator-tool.conf"
+    )
+    
+    for old_config in "${old_configs[@]}"; do
+        if [[ -f "$old_config" ]]; then
+            local new_config="${CONFIG_DIR}/config.conf"
+            if [[ ! -f "$new_config" ]]; then
+                info "Migrating old config to: $new_config"
+                mv "$old_config" "$new_config"
+            else
+                info "Removing old config file: $old_config"
+                rm -f "$old_config"
+            fi
+        fi
+    done
+}
+
+# Print installation summary
+print_summary() {
+    local os
+    os=$(detect_os)
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                 INSTALLATION COMPLETE! 🎉                   ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    
+    success "✅ Aztec Validator Tool installed successfully!"
+    echo ""
+    
+    echo "📁 Installation Details:"
+    echo "   • Script location: ${INSTALL_DIR}/${SCRIPT_NAME}"
+    echo "   • Command wrapper: ${BIN_DIR}/${COMMAND_NAME}"
+    echo "   • Configuration: ${CONFIG_DIR}/"
+    echo "   • Cache directory: ${CACHE_DIR}/"
+    echo ""
+    
+    echo "🚀 Quick Start:"
+    echo "   1. Reload your shell configuration:"
+    case "$os" in
+        "macos") echo "      source ~/.zshrc" ;;
+        *) echo "      source ~/.bashrc" ;;
+    esac
+    echo ""
+    echo "   2. Run the tool:"
+    echo "      ${COMMAND_NAME} 0xYOUR_VALIDATOR_ADDRESS"
+    echo ""
+    
+    echo "📖 Usage Examples:"
+    echo "   # Basic validator stats"
+    echo "   ${COMMAND_NAME} 0x581f8afba0ba7aa93c662e730559b63479ba70e3"
+    echo ""
+    echo "   # With epoch range and cookie setup"
+    echo "   ${COMMAND_NAME} 0x581f8afba0ba7aa93c662e730559b63479ba70e3 \\"
+    echo "     --epochs 1797:1897 --set-cookie"
+    echo ""
+    echo "   # Last 100 epochs with debug info"
+    echo "   ${COMMAND_NAME} 0x581f8afba0ba7aa93c662e730559b63479ba70e3 \\"
+    echo "     --last 100 --debug"
+    echo ""
+    
+    echo "🔧 Troubleshooting:"
+    echo "   • If command not found, run: source ~/.bashrc"
+    echo "   • For Cloudflare issues, use: ${COMMAND_NAME} --set-cookie"
+    echo "   • For help: ${COMMAND_NAME} --help"
+    echo ""
+    
+    warn "⚠️  Important: If you encounter Cloudflare protection, you'll need to:"
+    echo "   1. Visit https://dashtec.xyz in your browser"
+    echo "   2. Get the cf_clearance cookie from Developer Tools"
+    echo "   3. Run: ${COMMAND_NAME} your_address --set-cookie"
+}
+
+# Main installation process
+main() {
+    local os pkg_manager
+    
+    # Clear screen and show header
+    clear || true
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║          🚀 ENHANCED AZTEC VALIDATOR TOOL INSTALLER          ║"
+    echo "║                    One-Click Setup                          ║"
+    echo "║                   by Aabis Lone                             ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    
+    # System detection
+    os=$(detect_os)
+    pkg_manager=$(detect_package_manager)
+    
+    info "🔍 System Detection:"
+    echo "   • Operating System: $os"
+    echo "   • Package Manager: $pkg_manager"
+    echo ""
+    
+    # Pre-installation checks
+    info "🧹 Cleaning up old installations..."
+    cleanup_old_installations
+    
+    info "📦 Checking dependencies..."
+    check_dependencies
+    
+    # Create directories
+    info "📁 Creating directories..."
+    create_directories
+    
+    # Download and install
+    info "⬇️  Downloading latest version..."
+    download_script
+    
+    # Create wrapper and setup PATH
+    info "🔧 Setting up command wrapper..."
+    create_wrapper
+    
+    info "🛤️  Configuring PATH..."
+    setup_path
+    
+    # Verify installation
+    info "✅ Verifying installation..."
+    if verify_installation; then
+        print_summary
+        success "🎉 Installation completed successfully!"
+    else
+        cleanup_and_exit 1 "Installation verification failed"
+    fi
+}
+
+# Execute main function
+main "$@"

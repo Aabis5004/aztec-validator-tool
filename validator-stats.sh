@@ -327,7 +327,6 @@ parse_network_stats() {
     
     local current_epoch active_validators total_validators finalized_epoch
     
-    # Try multiple possible field names for current epoch
     current_epoch=$(jq -r '
         .currentEpoch // 
         .epoch // 
@@ -338,7 +337,6 @@ parse_network_stats() {
         .head_epoch //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    # Try multiple possible field names for active validators  
     active_validators=$(jq -r '
         .activeValidators // 
         .validators.active // 
@@ -354,7 +352,6 @@ parse_network_stats() {
         .sequencers_active //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    # Try multiple possible field names for total validators
     total_validators=$(jq -r '
         .totalValidators // 
         .validators.total // 
@@ -370,7 +367,6 @@ parse_network_stats() {
         .sequencers_total //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    # Try multiple possible field names for finalized epoch
     finalized_epoch=$(jq -r '
         .finalizedEpoch // 
         .finalized // 
@@ -403,7 +399,7 @@ parse_validator_stats() {
         .validator_status //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    # Parse attestation success rate - try percentage and decimal formats
+    # Parse attestation success rate
     attestation_success=$(jq -r '
         .attestationSuccess // 
         .attestationSuccessRate //
@@ -413,7 +409,6 @@ parse_validator_stats() {
         (.totalAttestationsSucceeded / (.totalAttestationsSucceeded + .totalAttestationsMissed) * 100 | tostring + "%") //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    # Parse attestation counts
     total_succeeded=$(jq -r '
         .totalAttestationsSucceeded // 
         .attestationsSucceeded //
@@ -455,7 +450,7 @@ parse_validator_stats() {
         .missed_blocks //
         0' "$json_file" 2>/dev/null || echo "0")
     
-    # Parse balance - handle STK token format
+    # Parse balance and always display STK
     balance=$(jq -r '
         .balance // 
         .validatorBalance //
@@ -464,498 +459,6 @@ parse_validator_stats() {
         .stakedAmount //
         .staked_amount //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
-    
-    # Convert balance from smallest unit to STK if it's a large number
+
     if [[ "$balance" =~ ^[0-9]+$ ]] && [[ ${#balance} -gt 15 ]]; then
-        # Large number - likely in smallest unit, convert to STK (assuming 18 decimals)
-        balance=$(echo "scale=6; $balance / 1000000000000000000" | bc 2>/dev/null || echo "$balance")
-        balance="${balance} STK"
-    elif [[ "$balance" =~ ^[0-9]+$ ]] && [[ ${#balance} -gt 6 ]]; then
-        # Medium number - might need conversion or could be in different unit
-        balance="${balance} tokens"
-    elif [[ "$balance" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        # Already decimal format
-        balance="${balance} STK"
-    fi
-    
-    effective_balance=$(jq -r '
-        .effectiveBalance // 
-        .effective_balance //
-        .validatorEffectiveBalance //
-        .validator_effective_balance //
-        .effectiveStake //
-        .effective_stake //
-        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
-    
-    # Convert effective balance similar to regular balance
-    if [[ "$effective_balance" =~ ^[0-9]+$ ]] && [[ ${#effective_balance} -gt 15 ]]; then
-        effective_balance=$(echo "scale=6; $effective_balance / 1000000000000000000" | bc 2>/dev/null || echo "$effective_balance")
-        effective_balance="${effective_balance} STK"
-    elif [[ "$effective_balance" =~ ^[0-9]+$ ]] && [[ ${#effective_balance} -gt 6 ]]; then
-        effective_balance="${effective_balance} tokens"
-    elif [[ "$effective_balance" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        effective_balance="${effective_balance} STK"
-    fi
-    
-    echo "${status}|${attestation_success}|${total_succeeded}|${total_missed}|${blocks_proposed}|${blocks_mined}|${blocks_missed}|${balance}|${effective_balance}"
-}
-
-parse_slashing_history() {
-    local json_file="$1"
-    local validator_address="$2"
-    
-    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
-        echo "0|0|N/A"
-        return
-    fi
-    
-    local total_events validator_slashes recent_event
-    
-    # Handle both array format and object with data field
-    total_events=$(jq -r '
-        if type=="array" then 
-            length 
-        else 
-            (.data // [] | length) // 
-            (.slashings // [] | length) // 
-            (.events // [] | length) // 
-            0 
-        end' "$json_file" 2>/dev/null || echo "0")
-    
-    # Find slashing events for this validator (try multiple field names)
-    validator_slashes=$(jq -r --arg addr "$validator_address" '
-        def get_events:
-            if type=="array" then . 
-            else (.data // .slashings // .events // []) end;
-        
-        get_events
-        | if type=="array" then
-            [ .[] | select(
-                (.validator // .address // .pubkey // .validatorAddress // .validator_address // "") 
-                | ascii_downcase == ($addr | ascii_downcase)
-            )] | length
-          else 0 end
-    ' "$json_file" 2>/dev/null || echo "0")
-    
-    # Get most recent event info (epoch/slot/block)
-    recent_event=$(jq -r '
-        def get_events:
-            if type=="array" then . 
-            else (.data // .slashings // .events // []) end;
-        
-        get_events
-        | if type=="array" and length > 0 then
-            .[0] | (
-                .epoch // 
-                .slot // 
-                .block // 
-                .blockNumber // 
-                .block_number //
-                .slotNumber //
-                .slot_number //
-                "N/A"
-            )
-          else "N/A" end
-    ' "$json_file" 2>/dev/null || echo "N/A")
-    
-    echo "${total_events}|${validator_slashes}|${recent_event}"
-}
-
-find_validator_rank() {
-    local json_file="$1"
-    local validator_address="$2"
-    
-    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
-        echo "N/A"
-        return
-    fi
-    
-    jq -r --arg addr "$validator_address" '
-        def as_list: if type=="array" then . else .data // [] end;
-        as_list
-        | to_entries
-        | map(select(
-            (.value.address // .value.validator // .value.pubkey // "") | ascii_downcase == ($addr | ascii_downcase)
-        ))
-        | if length > 0 then .[0].key + 1 else "Not ranked" end
-    ' "$json_file" 2>/dev/null || echo "N/A"
-}
-
-# Display functions
-print_header() {
-    clear || true
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║            🔍 ENHANCED AZTEC VALIDATOR STATS 🔍              ║"
-    echo "║                     by Aabis Lone                           ║"
-    echo "║               Enhanced with Full Features                    ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-}
-
-print_network_stats() {
-    local stats="$1"
-    IFS='|' read -r current_epoch active_validators total_validators finalized_epoch <<< "$stats"
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                        NETWORK OVERVIEW                      ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    printf "%-25s %s\n" "🌐 Current Epoch:" "$current_epoch"
-    printf "%-25s %s\n" "📊 Active Validators:" "$active_validators"
-    printf "%-25s %s\n" "📈 Total Validators:" "$total_validators"
-    printf "%-25s %s\n" "✅ Finalized Epoch:" "$finalized_epoch"
-}
-
-print_validator_stats() {
-    local address="$1"
-    local stats="$2"
-    IFS='|' read -r status attestation_success total_succeeded total_missed blocks_proposed blocks_mined blocks_missed balance effective_balance <<< "$stats"
-    
-    local total_attestations=$((total_succeeded + total_missed))
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                      VALIDATOR DETAILS                       ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    printf "%-25s %s\n" "🔑 Address:" "$address"
-    printf "%-25s %s\n" "📊 Status:" "$status"
-    printf "%-25s %s\n" "💰 Staked Balance:" "$balance"
-    printf "%-25s %s\n" "⚖️  Effective Balance:" "$effective_balance"
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                    ATTESTATION PERFORMANCE                   ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    printf "%-25s %s\n" "🎯 Success Rate:" "$attestation_success"
-    printf "%-25s %s\n" "📊 Total Attestations:" "$total_attestations"
-    printf "%-25s %s\n" "  ├─ ✅ Succeeded:" "$total_succeeded"
-    printf "%-25s %s\n" "  └─ ❌ Missed:" "$total_missed"
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                       BLOCK PERFORMANCE                      ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    printf "%-25s %s\n" "🏗️  Blocks Proposed:" "$blocks_proposed"
-    printf "%-25s %s\n" "⛏️  Blocks Mined:" "$blocks_mined"
-    printf "%-25s %s\n" "❌ Blocks Missed:" "$blocks_missed"
-}
-
-print_slashing_stats() {
-    local slashing_stats="$1"
-    IFS='|' read -r total_events validator_slashes recent_event <<< "$slashing_stats"
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                      SLASHING OVERVIEW                       ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    printf "%-25s %s\n" "🚨 Recent Events:" "$total_events"
-    printf "%-25s %s\n" "⚠️  Your Validator Hits:" "$validator_slashes"
-    printf "%-25s %s\n" "📅 Most Recent Event:" "$recent_event"
-    
-    if [[ "$validator_slashes" != "0" ]]; then
-        warn "⚠️  Your validator has been involved in slashing events!"
-    fi
-}
-
-print_top_validators() {
-    local rank="$1"
-    local window_desc="$2"
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                     VALIDATOR RANKING                        ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    printf "%-25s %s\n" "📊 Analysis Window:" "$window_desc"
-    printf "%-25s %s\n" "🏆 Your Rank:" "$rank"
-    
-    if [[ "$rank" =~ ^[0-9]+$ ]]; then
-        if [[ $rank -le 10 ]]; then
-            success "🎉 Excellent! You're in the top 10 validators!"
-        elif [[ $rank -le 50 ]]; then
-            success "👏 Great performance! You're in the top 50!"
-        elif [[ $rank -le 100 ]]; then
-            info "👍 Good performance! You're in the top 100!"
-        fi
-    fi
-}
-
-print_accusations() {
-    local json_file="$1"
-    
-    echo ""
-    highlight "╔══════════════════════════════════════════════════════════════╗"
-    highlight "║                        ACCUSATIONS                           ║"
-    highlight "╚══════════════════════════════════════════════════════════════╝"
-    
-    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
-        printf "%-25s %s\n" "📋 Status:" "No data available"
-        return
-    fi
-    
-    local total_accusations received_accusations executed_accusations
-    
-    total_accusations=$(jq -r 'length // 0' "$json_file" 2>/dev/null || echo "0")
-    received_accusations=$(jq -r '[.[] | select(.type == "received" or .status == "received")] | length' "$json_file" 2>/dev/null || echo "0")
-    executed_accusations=$(jq -r '[.[] | select(.type == "executed" or .status == "executed")] | length' "$json_file" 2>/dev/null || echo "0")
-    
-    printf "%-25s %s\n" "📋 Total Accusations:" "$total_accusations"
-    printf "%-25s %s\n" "📨 Received:" "$received_accusations"
-    printf "%-25s %s\n" "⚖️  Executed:" "$executed_accusations"
-    
-    if [[ "$total_accusations" != "0" ]]; then
-        warn "⚠️  Your validator has been accused!"
-        
-        # Show recent accusations
-        local recent_accusations
-        recent_accusations=$(jq -r '.[0:3] | .[] | "  • Epoch \(.epoch // .block // "N/A"): \(.type // .reason // "Unknown")"' "$json_file" 2>/dev/null || true)
-        
-        if [[ -n "$recent_accusations" ]]; then
-            echo ""
-            echo "Recent accusations:"
-            echo "$recent_accusations"
-        fi
-    fi
-}
-
-# Usage and help
-usage() {
-    cat <<'EOF'
-Enhanced Aztec Validator Stats Tool
-
-USAGE:
-    aztec-stats <validator_address> [OPTIONS]
-
-VALIDATOR ADDRESS:
-    Ethereum address (0x + 40 hex characters)
-
-OPTIONS:
-    --epochs START:END      Epoch range for top validators (e.g., 1800:1900)
-    --last N                Use last N epochs from current epoch
-    --slashing-limit N      Number of recent slashing events to fetch (default: 50)
-    --cookie TOKEN          Provide cf_clearance token for this session
-    --set-cookie           Interactively set and save cf_clearance token
-    --verbose              Show detailed progress information
-    --debug                Enable debug output
-    --raw                  Show raw API responses on errors
-    --help, -h             Show this help message
-
-EXAMPLES:
-    # Basic validator stats
-    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3
-
-    # With specific epoch range
-    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --epochs 1797:1897
-
-    # Last 100 epochs with cookie setup
-    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --last 100 --set-cookie
-
-    # Debug mode with verbose output
-    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --debug --verbose
-
-FEATURES:
-    ✅ Network overview (active/total validators, current epoch)
-    ✅ Validator performance (attestations, blocks, balance)
-    ✅ Slashing history and your validator's involvement
-    ✅ Top validator rankings with your position
-    ✅ Accusations received and executed
-    ✅ Cloudflare cookie management
-    ✅ Comprehensive error handling and logging
-
-DATA SOURCE:
-    All data is fetched from dashtec.xyz API
-EOF
-}
-
-# Main execution
-main() {
-    local validator_address=""
-    local epoch_start=""
-    local epoch_end=""
-    local last_n=""
-    local slashing_limit="50"
-    local set_cookie=0
-    
-    # Parse arguments
-    if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
-        usage
-        exit 0
-    fi
-    
-    validator_address="$1"
-    shift
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --epochs)
-                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+:[0-9]+$ ]]; then
-                    IFS=':' read -r epoch_start epoch_end <<< "$2"
-                    shift 2
-                else
-                    error "Invalid epochs format. Use: --epochs START:END"
-                    exit 1
-                fi
-                ;;
-            --last)
-                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
-                    last_n="$2"
-                    shift 2
-                else
-                    error "Invalid last epochs format. Use: --last N"
-                    exit 1
-                fi
-                ;;
-            --slashing-limit)
-                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
-                    slashing_limit="$2"
-                    shift 2
-                else
-                    error "Invalid slashing limit. Use: --slashing-limit N"
-                    exit 1
-                fi
-                ;;
-            --cookie)
-                CF_CLEARANCE="${2:-}"
-                shift 2
-                ;;
-            --set-cookie)
-                set_cookie=1
-                shift
-                ;;
-            --verbose)
-                VERBOSE=1
-                shift
-                ;;
-            --debug)
-                DEBUG=1
-                shift
-                ;;
-            --raw)
-                SHOW_RAW=1
-                shift
-                ;;
-            *)
-                warn "Unknown option: $1"
-                shift
-                ;;
-        esac
-    done
-    
-    # Initialize
-    print_header
-    check_dependencies
-    load_config
-    
-    # Handle cookie setup
-    if [[ $set_cookie -eq 1 && -z "${CF_CLEARANCE:-}" ]]; then
-        prompt_cookie
-    fi
-    
-    # Validate address
-    validator_address=$(validate_address "$validator_address")
-    
-    # Create temporary directory
-    tmpdir=$(mktemp -d)
-    
-    # File paths
-    local network_json="$tmpdir/network.json"
-    local validator_json="$tmpdir/validator.json"
-    local slashing_json="$tmpdir/slashing.json"
-    local top_json="$tmpdir/top.json"
-    local accusations_json="$tmpdir/accusations.json"
-    
-    # Fetch network stats
-    if fetch_network_stats "$network_json"; then
-        network_stats=$(parse_network_stats "$network_json")
-        current_epoch=$(echo "$network_stats" | cut -d'|' -f1)
-    else
-        network_stats="N/A|N/A|N/A|N/A"
-        current_epoch=""
-    fi
-    
-    # Fetch validator stats
-    if ! fetch_validator_stats "$validator_address" "$validator_json"; then
-        cleanup_and_exit 1 "Failed to fetch validator data"
-    fi
-    validator_stats=$(parse_validator_stats "$validator_json")
-    
-    # Fetch slashing history
-    if fetch_slashing_history "$slashing_json" "$slashing_limit"; then
-        slashing_stats=$(parse_slashing_history "$slashing_json" "$validator_address")
-    else
-        slashing_stats="N/A|0|N/A"
-    fi
-    
-    # Fetch accusations
-    if fetch_accusations "$validator_address" "$accusations_json"; then
-        accusations_available=1
-    else
-        accusations_available=0
-    fi
-    
-    # Determine epoch range for top validators
-    local window_description="Not specified"
-    local validator_rank="N/A"
-    
-    if [[ -n "$epoch_start" && -n "$epoch_end" ]]; then
-        window_description="Epochs ${epoch_start}:${epoch_end}"
-        if fetch_top_validators "$top_json" "$epoch_start" "$epoch_end"; then
-            validator_rank=$(find_validator_rank "$top_json" "$validator_address")
-        fi
-    elif [[ -n "$last_n" && -n "$current_epoch" && "$current_epoch" != "N/A" ]]; then
-        local start_epoch=$((current_epoch - last_n + 1))
-        [[ $start_epoch -lt 0 ]] && start_epoch=0
-        window_description="Last ${last_n} epochs (${start_epoch}:${current_epoch})"
-        if fetch_top_validators "$top_json" "$start_epoch" "$current_epoch"; then
-            validator_rank=$(find_validator_rank "$top_json" "$validator_address")
-        fi
-    elif [[ -n "$current_epoch" && "$current_epoch" != "N/A" ]]; then
-        # Default to last 50 epochs if we have current epoch but no specific range
-        local default_range=50
-        local start_epoch=$((current_epoch - default_range + 1))
-        [[ $start_epoch -lt 0 ]] && start_epoch=0
-        window_description="Auto: Last ${default_range} epochs (${start_epoch}:${current_epoch})"
-        info "No epoch range specified, using default last $default_range epochs"
-        if fetch_top_validators "$top_json" "$start_epoch" "$current_epoch"; then
-            validator_rank=$(find_validator_rank "$top_json" "$validator_address")
-        fi
-    else
-        warn "Cannot determine epoch range - current epoch unknown. Use --epochs START:END or --last N"
-        window_description="Cannot determine (no current epoch)"
-    fi
-    
-    # Display results
-    print_network_stats "$network_stats"
-    print_validator_stats "$validator_address" "$validator_stats"
-    print_slashing_stats "$slashing_stats"
-    print_top_validators "$validator_rank" "$window_description"
-    
-    if [[ $accusations_available -eq 1 ]]; then
-        print_accusations "$accusations_json"
-    else
-        echo ""
-        highlight "╔══════════════════════════════════════════════════════════════╗"
-        highlight "║                        ACCUSATIONS                           ║"
-        highlight "╚══════════════════════════════════════════════════════════════╝"
-        printf "%-25s %s\n" "📋 Status:" "No accusations data available"
-    fi
-    
-    # Summary footer
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                         SUMMARY                              ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    success "✅ Data successfully retrieved from dashtec.xyz"
-    info "🕒 Generated on: $(date)"
-    
-    # Cleanup
-    cleanup_and_exit 0
-}
-
-# Execute main function with all arguments
-main "$@"
+        balance=$(echo "scale=6; $

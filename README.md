@@ -9,4 +9,4 @@ This tool shows your **Aztec validator performance** – how many attestations y
 Copy and paste this command in your terminal:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Aabis5004/aztec-validator-tool/main/install.sh)

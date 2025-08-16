@@ -325,9 +325,6 @@ parse_network_stats() {
         return
     fi
     
-    debug "Parsing network stats from: $json_file"
-    [[ $DEBUG -eq 1 ]] && echo "Network JSON content:" && jq '.' "$json_file" 2>/dev/null || true
-    
     local current_epoch active_validators total_validators finalized_epoch
     
     # Try multiple possible field names for current epoch
@@ -384,8 +381,6 @@ parse_network_stats() {
         .last_finalized_epoch //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    debug "Parsed network stats: epoch=$current_epoch, active=$active_validators, total=$total_validators, finalized=$finalized_epoch"
-    
     echo "${current_epoch}|${active_validators}|${total_validators}|${finalized_epoch}"
 }
 
@@ -396,9 +391,6 @@ parse_validator_stats() {
         echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A"
         return
     fi
-    
-    debug "Parsing validator stats from: $json_file"
-    [[ $DEBUG -eq 1 ]] && echo "Validator JSON content:" && jq '.' "$json_file" 2>/dev/null || true
     
     local status attestation_success total_succeeded total_missed
     local blocks_proposed blocks_mined blocks_missed balance effective_balance
@@ -463,7 +455,7 @@ parse_validator_stats() {
         .missed_blocks //
         0' "$json_file" 2>/dev/null || echo "0")
     
-    # Parse balance - handle Aztec token format (not ETH)
+    # Parse balance - handle STK token format
     balance=$(jq -r '
         .balance // 
         .validatorBalance //
@@ -473,17 +465,17 @@ parse_validator_stats() {
         .staked_amount //
         "N/A"' "$json_file" 2>/dev/null || echo "N/A")
     
-    # Convert balance from smallest unit to main token if it's a large number
+    # Convert balance from smallest unit to STK if it's a large number
     if [[ "$balance" =~ ^[0-9]+$ ]] && [[ ${#balance} -gt 15 ]]; then
-        # Large number - likely in smallest unit, convert to main token (assuming 18 decimals)
+        # Large number - likely in smallest unit, convert to STK (assuming 18 decimals)
         balance=$(echo "scale=6; $balance / 1000000000000000000" | bc 2>/dev/null || echo "$balance")
-        balance="${balance} AZTEC"
+        balance="${balance} STK"
     elif [[ "$balance" =~ ^[0-9]+$ ]] && [[ ${#balance} -gt 6 ]]; then
         # Medium number - might need conversion or could be in different unit
         balance="${balance} tokens"
     elif [[ "$balance" =~ ^[0-9]+\.[0-9]+$ ]]; then
         # Already decimal format
-        balance="${balance} AZTEC"
+        balance="${balance} STK"
     fi
     
     effective_balance=$(jq -r '
@@ -498,14 +490,12 @@ parse_validator_stats() {
     # Convert effective balance similar to regular balance
     if [[ "$effective_balance" =~ ^[0-9]+$ ]] && [[ ${#effective_balance} -gt 15 ]]; then
         effective_balance=$(echo "scale=6; $effective_balance / 1000000000000000000" | bc 2>/dev/null || echo "$effective_balance")
-        effective_balance="${effective_balance} AZTEC"
+        effective_balance="${effective_balance} STK"
     elif [[ "$effective_balance" =~ ^[0-9]+$ ]] && [[ ${#effective_balance} -gt 6 ]]; then
         effective_balance="${effective_balance} tokens"
     elif [[ "$effective_balance" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        effective_balance="${effective_balance} AZTEC"
+        effective_balance="${effective_balance} STK"
     fi
-    
-    debug "Parsed validator stats: status=$status, success=$attestation_success, succeeded=$total_succeeded, missed=$total_missed"
     
     echo "${status}|${attestation_success}|${total_succeeded}|${total_missed}|${blocks_proposed}|${blocks_mined}|${blocks_missed}|${balance}|${effective_balance}"
 }
@@ -518,9 +508,6 @@ parse_slashing_history() {
         echo "0|0|N/A"
         return
     fi
-    
-    debug "Parsing slashing history from: $json_file for validator: $validator_address"
-    [[ $DEBUG -eq 1 ]] && echo "Slashing JSON content:" && jq '.' "$json_file" 2>/dev/null || true
     
     local total_events validator_slashes recent_event
     
@@ -570,8 +557,6 @@ parse_slashing_history() {
             )
           else "N/A" end
     ' "$json_file" 2>/dev/null || echo "N/A")
-    
-    debug "Parsed slashing stats: total=$total_events, validator_hits=$validator_slashes, recent=$recent_event"
     
     echo "${total_events}|${validator_slashes}|${recent_event}"
 }
@@ -888,14 +873,6 @@ main() {
     if fetch_network_stats "$network_json"; then
         network_stats=$(parse_network_stats "$network_json")
         current_epoch=$(echo "$network_stats" | cut -d'|' -f1)
-        
-        # If we're still getting N/A values in debug mode, show the raw JSON
-        if [[ $DEBUG -eq 1 && "$network_stats" == "N/A|N/A|N/A|N/A" ]]; then
-            warn "Network stats parsing failed. Raw JSON response:"
-            echo "--- NETWORK API RESPONSE ---"
-            cat "$network_json" 2>/dev/null || echo "Failed to read response file"
-            echo "--- END RESPONSE ---"
-        fi
     else
         network_stats="N/A|N/A|N/A|N/A"
         current_epoch=""
@@ -906,18 +883,6 @@ main() {
         cleanup_and_exit 1 "Failed to fetch validator data"
     fi
     validator_stats=$(parse_validator_stats "$validator_json")
-    
-    # Debug validator parsing if needed
-    if [[ $DEBUG -eq 1 ]]; then
-        debug "Raw validator stats result: $validator_stats"
-        # Show specific parsing issues
-        if echo "$validator_stats" | grep -q "N/A.*N/A.*N/A"; then
-            warn "Some validator data could not be parsed. Check JSON structure:"
-            echo "--- VALIDATOR API RESPONSE (first 500 chars) ---"
-            head -c 500 "$validator_json" 2>/dev/null || echo "Failed to read response file"
-            echo "--- END PARTIAL RESPONSE ---"
-        fi
-    fi
     
     # Fetch slashing history
     if fetch_slashing_history "$slashing_json" "$slashing_limit"; then
@@ -987,19 +952,6 @@ main() {
     echo "╚══════════════════════════════════════════════════════════════╝"
     success "✅ Data successfully retrieved from dashtec.xyz"
     info "🕒 Generated on: $(date)"
-    
-    # Debug information
-    if [[ $DEBUG -eq 1 ]]; then
-        echo ""
-        echo "🔍 DEBUG INFORMATION:"
-        echo "  Network data: $network_json"
-        echo "  Validator data: $validator_json"
-        echo "  Slashing data: $slashing_json"
-        [[ -f "$top_json" ]] && echo "  Top validators: $top_json"
-        [[ -f "$accusations_json" ]] && echo "  Accusations: $accusations_json"
-        echo "  Config file: $CONFIG_FILE"
-        echo "  Cache directory: $CACHE_DIR"
-    fi
     
     # Cleanup
     cleanup_and_exit 0

@@ -1,491 +1,791 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# Enhanced Aztec Validator Stats Tool
+# Author: Aabis Lone (Enhanced)
+# Features: Network stats, validator details, slashing history, top validators, accusations
 
-# Colors for better output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-PURPLE='\033[0;35m'
-BOLD='\033[1m'
-NC='\033[0m'
+set -Eeuo pipefail
 
-# Configuration - Universal paths (no directory issues)
-COOKIE_FILE="$HOME/.aztec_validator_cookie"
-CONFIG_FILE="$HOME/.aztec_validator_config"
-USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+# Colors and styling
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly BLUE='\033[0;34m'
+readonly YELLOW='\033[1;33m'
+readonly CYAN='\033[0;36m'
+readonly MAGENTA='\033[0;35m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m'
 
-# API Endpoints - Multiple sources for comprehensive data
-DASHTEC_BASE="https://dashtec.xyz/api"
-AZTEC_BASE="https://api.mainnet.aztec.network"
+# Logging functions
+info() { echo -e "${BLUE}ℹ${NC} $*"; }
+success() { echo -e "${GREEN}✓${NC} $*"; }
+error() { echo -e "${RED}✗${NC} $*" >&2; }
+warn() { echo -e "${YELLOW}⚠${NC} $*"; }
+debug() { [[ $DEBUG -eq 1 ]] && echo -e "${CYAN}🔍${NC} $*" || true; }
+highlight() { echo -e "${BOLD}$*${NC}"; }
 
-# Help function
-show_help() {
-    cat <<EOF
-${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}
-${CYAN}${BOLD}║               AZTEC VALIDATOR STATS TOOL                     ║${NC}
-${CYAN}${BOLD}║                     by Aabis Lone                            ║${NC}
-${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}
+# Configuration
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly CONFIG_FILE="${HOME}/.config/aztec-validator/config.conf"
+readonly CACHE_DIR="${HOME}/.cache/aztec-validator"
+readonly LOG_FILE="${CACHE_DIR}/aztec-validator.log"
 
-${BOLD}Usage:${NC}
-  aztec-stats <validator_address> [options]
+# API Configuration
+readonly DASHTEC_HOST="https://dashtec.xyz"
+readonly API_VALIDATOR="${DASHTEC_HOST}/api/validators"
+readonly API_GENERAL="${DASHTEC_HOST}/api/stats/general"
+readonly API_SLASHING="${DASHTEC_HOST}/api/slashing-history"
+readonly API_TOP="${DASHTEC_HOST}/api/dashboard/top-validators"
+readonly API_ACCUSATIONS="${DASHTEC_HOST}/api/accusations"
 
-${BOLD}Options:${NC}
-  --epochs START:END    Get stats for specific epoch range (e.g., 1800:1900)
-  --last N              Get stats for last N epochs
-  --cookie TOKEN        Provide Cloudflare cf_clearance token
-  --set-cookie          Interactively set and save Cloudflare cookie
-  --debug               Show raw JSON responses for troubleshooting
-  --help, -h            Show this help message
+# Default values
+readonly UA_DEFAULT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+readonly DEFAULT_REFERER="https://dashtec.xyz/"
 
-${BOLD}Examples:${NC}
-  aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3
-  aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --epochs 1797:1897
-  aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --last 120 --set-cookie
+# Global variables
+CF_CLEARANCE="${CF_CLEARANCE:-}"
+USER_AGENT="${USER_AGENT:-$UA_DEFAULT}"
+DEBUG=0
+VERBOSE=0
+SHOW_RAW=0
 
-${BOLD}Complete Stats Include:${NC}
-  🌐 Network Overview    📊 Attestation Stats    📋 Block Production
-  🔨 Slashing History    ⚠️  Accusations        👥 Committee Roles
-  🏆 Validator Rankings  📈 Performance Trends   💰 Reward Analytics
-EOF
+# Error handling
+trap 'cleanup_and_exit 1 "Unexpected error occurred"' ERR
+
+cleanup_and_exit() {
+    local exit_code=${1:-0}
+    local message=${2:-""}
+    
+    [[ -n "$message" ]] && error "$message"
+    [[ -d "${tmpdir:-}" ]] && rm -rf "$tmpdir"
+    exit "$exit_code"
 }
 
-# Utility functions
-info() { echo -e "${BLUE}ℹ️  $*${NC}"; }
-success() { echo -e "${GREEN}✅ $*${NC}"; }
-warning() { echo -e "${YELLOW}⚠️  $*${NC}"; }
-error() { echo -e "${RED}❌ $*${NC}"; }
-
-# Validate Ethereum address
-validate_address() {
-    local addr=$1
-    if [[ ! $addr =~ ^0x[a-fA-F0-9]{40}$ ]]; then
-        error "Invalid Ethereum address format"
-        echo -e "${YELLOW}Address must be 42 characters starting with 0x${NC}"
-        exit 1
-    fi
+# OS Detection
+detect_os() {
+    case "${OSTYPE:-}" in
+        linux-gnu*)
+            if grep -qi microsoft /proc/version 2>/dev/null; then
+                echo "wsl"
+            else
+                echo "linux"
+            fi
+            ;;
+        darwin*) echo "mac" ;;
+        *) echo "unknown" ;;
+    esac
 }
 
-# Check dependencies
+# Dependency management
 check_dependencies() {
     local missing=()
-    for cmd in curl jq bc; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing+=("$cmd")
+    local required_tools=("curl" "jq" "bc")
+    
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing+=("$tool")
         fi
     done
     
-    if [ ${#missing[@]} -ne 0 ]; then
-        error "Missing required dependencies: ${missing[*]}"
-        echo -e "${YELLOW}Install with:${NC}"
-        echo -e "${YELLOW}  Ubuntu/Debian: sudo apt install ${missing[*]}${NC}"
-        echo -e "${YELLOW}  macOS: brew install ${missing[*]}${NC}"
-        exit 1
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        warn "Missing dependencies: ${missing[*]}"
+        install_dependencies "${missing[@]}"
     fi
 }
 
-# Load configuration
-load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
-    fi
-    if [[ -f "$COOKIE_FILE" ]]; then
-        CF_CLEARANCE=$(cat "$COOKIE_FILE")
-    fi
-}
-
-# Save cookie
-save_cookie() {
-    local cookie="$1"
-    echo "$cookie" > "$COOKIE_FILE"
-    chmod 600 "$COOKIE_FILE"
-    success "Cookie saved securely"
-}
-
-# Interactive cookie setup
-setup_cookie() {
-    echo -e "${YELLOW}🍪 Cloudflare Cookie Setup${NC}"
-    echo -e "${BLUE}1. Open https://dashtec.xyz in your browser${NC}"
-    echo -e "${BLUE}2. Press F12 (Developer Tools)${NC}"
-    echo -e "${BLUE}3. Go to Application/Storage → Cookies → https://dashtec.xyz${NC}"
-    echo -e "${BLUE}4. Find 'cf_clearance' and copy its value${NC}"
-    echo ""
-    echo -n "Paste cf_clearance value (or press Enter to skip): "
-    read -r cookie_input
+install_dependencies() {
+    local deps=("$@")
+    local os
+    os=$(detect_os)
     
-    if [[ -n "$cookie_input" ]]; then
-        save_cookie "$cookie_input"
-        CF_CLEARANCE="$cookie_input"
+    info "Installing dependencies: ${deps[*]}"
+    
+    case "$os" in
+        wsl|linux)
+            if command -v apt >/dev/null 2>&1; then
+                sudo apt update && sudo apt install -y "${deps[@]}"
+            elif command -v yum >/dev/null 2>&1; then
+                sudo yum install -y "${deps[@]}"
+            elif command -v dnf >/dev/null 2>&1; then
+                sudo dnf install -y "${deps[@]}"
+            else
+                error "No supported package manager found"
+                return 1
+            fi
+            ;;
+        mac)
+            if ! command -v brew >/dev/null 2>&1; then
+                error "Homebrew not found. Install from: https://brew.sh"
+                return 1
+            fi
+            brew install "${deps[@]}"
+            ;;
+        *)
+            error "Unsupported OS: ${os}"
+            return 1
+            ;;
+    esac
+    
+    success "Dependencies installed successfully"
+}
+
+# Configuration management
+create_directories() {
+    mkdir -p "$(dirname "$CONFIG_FILE")" "$CACHE_DIR"
+}
+
+load_config() {
+    create_directories
+    
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+        debug "Config loaded from $CONFIG_FILE"
+    fi
+    
+    # Environment variables override config file
+    CF_CLEARANCE="${CF_CLEARANCE:-${CF_CLEARANCE_CONFIG:-}}"
+    USER_AGENT="${USER_AGENT:-${USER_AGENT_CONFIG:-$UA_DEFAULT}}"
+}
+
+save_config() {
+    create_directories
+    
+    cat > "$CONFIG_FILE" <<EOF
+# Aztec Validator Tool Configuration
+# Generated on $(date)
+CF_CLEARANCE_CONFIG='${CF_CLEARANCE}'
+USER_AGENT_CONFIG='${USER_AGENT}'
+EOF
+    
+    success "Configuration saved to $CONFIG_FILE"
+}
+
+prompt_cookie() {
+    echo ""
+    highlight "Cloudflare Cookie Setup"
+    echo "To get your cf_clearance cookie:"
+    echo "1. Open https://dashtec.xyz in Chrome"
+    echo "2. Press F12 → Application tab → Cookies → https://dashtec.xyz"
+    echo "3. Copy the 'cf_clearance' value"
+    echo ""
+    
+    read -r -p "Paste cf_clearance (or press Enter to skip): " CF_INPUT || true
+    
+    if [[ -n "${CF_INPUT:-}" ]]; then
+        CF_CLEARANCE="$CF_INPUT"
+        save_config
+        success "Cookie saved and will be used for future requests"
+    else
+        warn "Continuing without cf_clearance (requests may be blocked)"
+    fi
+}
+
+# HTTP utilities
+http_request() {
+    local url="$1"
+    local output_file="$2"
+    local method="${3:-GET}"
+    
+    local -a curl_args=(
+        -sSL
+        -X "$method"
+        -H "User-Agent: ${USER_AGENT}"
+        -H "Accept: application/json, */*"
+        -H "Referer: ${DEFAULT_REFERER}"
+        -w '%{http_code}'
+        -o "$output_file"
+        --connect-timeout 30
+        --max-time 60
+    )
+    
+    [[ -n "${CF_CLEARANCE:-}" ]] && curl_args+=(-H "Cookie: cf_clearance=${CF_CLEARANCE}")
+    
+    debug "Making $method request to: $url"
+    
+    local http_code
+    http_code=$(curl "${curl_args[@]}" "$url" 2>/dev/null || echo "000")
+    
+    debug "HTTP response code: $http_code"
+    echo "$http_code"
+}
+
+is_valid_json() {
+    [[ -f "$1" ]] && jq -e . >/dev/null 2>&1 < "$1"
+}
+
+# Address validation
+validate_address() {
+    local addr="$1"
+    local addr_lower
+    addr_lower=$(echo "$addr" | tr 'A-F' 'a-f')
+    
+    if [[ ! "$addr_lower" =~ ^0x[0-9a-f]{40}$ ]]; then
+        error "Invalid Ethereum address format"
+        error "Expected: 0x followed by 40 hexadecimal characters"
+        error "Received: $addr"
+        return 1
+    fi
+    
+    echo "$addr_lower"
+}
+
+# API data fetchers
+fetch_network_stats() {
+    local output_file="$1"
+    local http_code
+    
+    info "Fetching network statistics..."
+    http_code=$(http_request "$API_GENERAL" "$output_file")
+    
+    if [[ "$http_code" == "200" && -s "$output_file" ]] && is_valid_json "$output_file"; then
+        success "Network stats retrieved"
         return 0
     else
-        warning "Continuing without cookie (may encounter Cloudflare blocks)"
+        warn "Failed to fetch network stats (HTTP $http_code)"
         return 1
     fi
 }
 
-# Enhanced HTTP request function
-make_request() {
-    local url="$1"
+fetch_validator_stats() {
+    local address="$1"
     local output_file="$2"
-    local headers=()
-    
-    headers+=("-H" "User-Agent: $USER_AGENT")
-    headers+=("-H" "Accept: application/json, */*")
-    headers+=("-H" "Referer: https://dashtec.xyz/")
-    
-    if [[ -n "${CF_CLEARANCE:-}" ]]; then
-        headers+=("-H" "Cookie: cf_clearance=$CF_CLEARANCE")
-    fi
-    
     local http_code
-    http_code=$(curl -s -w "%{http_code}" -o "$output_file" "${headers[@]}" "$url" 2>/dev/null || echo "000")
     
-    echo "$http_code"
+    info "Fetching validator data for: $address"
+    http_code=$(http_request "${API_VALIDATOR}/${address}" "$output_file")
+    
+    if [[ "$http_code" == "200" && -s "$output_file" ]] && is_valid_json "$output_file"; then
+        success "Validator stats retrieved"
+        return 0
+    else
+        error "Failed to fetch validator stats (HTTP $http_code)"
+        [[ $SHOW_RAW -eq 1 ]] && { echo "--- RAW RESPONSE ---"; cat "$output_file" 2>/dev/null || true; }
+        return 1
+    fi
 }
 
-# Parse command line arguments
-ADDRESS=""
-EPOCH_START=""
-EPOCH_END=""
-LAST_N=""
-DEBUG=false
-SET_COOKIE=false
+fetch_slashing_history() {
+    local output_file="$1"
+    local limit="${2:-50}"
+    local http_code
+    
+    info "Fetching slashing history (last $limit events)..."
+    http_code=$(http_request "${API_SLASHING}?page=1&limit=$limit" "$output_file")
+    
+    if [[ "$http_code" == "200" && -s "$output_file" ]] && is_valid_json "$output_file"; then
+        success "Slashing history retrieved"
+        return 0
+    else
+        warn "Failed to fetch slashing history (HTTP $http_code)"
+        return 1
+    fi
+}
 
-if [ $# -lt 1 ]; then
-    show_help
-    exit 1
-fi
+fetch_top_validators() {
+    local output_file="$1"
+    local start_epoch="$2"
+    local end_epoch="$3"
+    local http_code
+    
+    info "Fetching top validators for epochs ${start_epoch}:${end_epoch}..."
+    http_code=$(http_request "${API_TOP}?startEpoch=${start_epoch}&endEpoch=${end_epoch}" "$output_file")
+    
+    if [[ "$http_code" == "200" && -s "$output_file" ]] && is_valid_json "$output_file"; then
+        success "Top validators data retrieved"
+        return 0
+    else
+        warn "Failed to fetch top validators (HTTP $http_code)"
+        return 1
+    fi
+}
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --epochs)
-            if [[ -n "$2" && "$2" =~ ^[0-9]+:[0-9]+$ ]]; then
-                IFS=':' read -r EPOCH_START EPOCH_END <<< "$2"
-                shift 2
-            else
-                error "Invalid epochs format. Use: START:END (e.g., 1800:1900)"
-                exit 1
-            fi
-            ;;
-        --last)
-            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
-                LAST_N="$2"
-                shift 2
-            else
-                error "Invalid number for --last option"
-                exit 1
-            fi
-            ;;
-        --cookie)
-            if [[ -n "$2" ]]; then
-                CF_CLEARANCE="$2"
-                shift 2
-            else
-                error "Cookie value required"
-                exit 1
-            fi
-            ;;
-        --set-cookie)
-            SET_COOKIE=true
-            shift
-            ;;
-        --debug)
-            DEBUG=true
-            shift
-            ;;
-        --help|-h)
-            show_help
-            exit 0
-            ;;
-        0x*)
-            ADDRESS="$1"
-            shift
-            ;;
-        *)
-            warning "Unknown option: $1"
-            shift
-            ;;
-    esac
-done
+fetch_accusations() {
+    local address="$1"
+    local output_file="$2"
+    local http_code
+    
+    info "Fetching accusations for validator: $address"
+    http_code=$(http_request "${API_ACCUSATIONS}/${address}" "$output_file")
+    
+    if [[ "$http_code" == "200" && -s "$output_file" ]] && is_valid_json "$output_file"; then
+        success "Accusations data retrieved"
+        return 0
+    else
+        warn "Failed to fetch accusations (HTTP $http_code)"
+        return 1
+    fi
+}
+
+# Data processing and display
+parse_network_stats() {
+    local json_file="$1"
+    
+    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
+        echo "N/A|N/A|N/A|N/A"
+        return
+    fi
+    
+    local current_epoch active_validators total_validators finalized_epoch
+    
+    current_epoch=$(jq -r '.currentEpoch // .epoch // .latestEpoch // "N/A"' "$json_file")
+    active_validators=$(jq -r '.activeValidators // .validators.active // .active // "N/A"' "$json_file")
+    total_validators=$(jq -r '.totalValidators // .validators.total // .total // "N/A"' "$json_file")
+    finalized_epoch=$(jq -r '.finalizedEpoch // .finalized // "N/A"' "$json_file")
+    
+    echo "${current_epoch}|${active_validators}|${total_validators}|${finalized_epoch}"
+}
+
+parse_validator_stats() {
+    local json_file="$1"
+    
+    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
+        echo "N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A"
+        return
+    fi
+    
+    local status attestation_success total_succeeded total_missed
+    local blocks_proposed blocks_mined blocks_missed balance effective_balance
+    
+    status=$(jq -r '.status // "N/A"' "$json_file")
+    attestation_success=$(jq -r '.attestationSuccess // "N/A"' "$json_file")
+    total_succeeded=$(jq -r '.totalAttestationsSucceeded // 0' "$json_file")
+    total_missed=$(jq -r '.totalAttestationsMissed // 0' "$json_file")
+    blocks_proposed=$(jq -r '.totalBlocksProposed // 0' "$json_file")
+    blocks_mined=$(jq -r '.totalBlocksMined // 0' "$json_file")
+    blocks_missed=$(jq -r '.totalBlocksMissed // 0' "$json_file")
+    balance=$(jq -r '.balance // "N/A"' "$json_file")
+    effective_balance=$(jq -r '.effectiveBalance // "N/A"' "$json_file")
+    
+    echo "${status}|${attestation_success}|${total_succeeded}|${total_missed}|${blocks_proposed}|${blocks_mined}|${blocks_missed}|${balance}|${effective_balance}"
+}
+
+parse_slashing_history() {
+    local json_file="$1"
+    local validator_address="$2"
+    
+    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
+        echo "0|0|N/A"
+        return
+    fi
+    
+    local total_events validator_slashes recent_event
+    
+    total_events=$(jq -r 'if type=="array" then length else (.data|length // 0) end' "$json_file")
+    
+    validator_slashes=$(jq -r --arg addr "$validator_address" '
+        (if has("data") then .data else . end)
+        | if type=="array" then
+            [ .[] | select(
+                (.validator // .address // .pubkey // "") | ascii_downcase == ($addr | ascii_downcase)
+            )] | length
+          else 0 end
+    ' "$json_file")
+    
+    recent_event=$(jq -r '
+        (if has("data") then .data else . end)
+        | if type=="array" and length > 0 then
+            .[0] | (.epoch // .slot // "N/A")
+          else "N/A" end
+    ' "$json_file")
+    
+    echo "${total_events}|${validator_slashes}|${recent_event}"
+}
+
+find_validator_rank() {
+    local json_file="$1"
+    local validator_address="$2"
+    
+    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
+        echo "N/A"
+        return
+    fi
+    
+    jq -r --arg addr "$validator_address" '
+        def as_list: if type=="array" then . else .data // [] end;
+        as_list
+        | to_entries
+        | map(select(
+            (.value.address // .value.validator // .value.pubkey // "") | ascii_downcase == ($addr | ascii_downcase)
+        ))
+        | if length > 0 then .[0].key + 1 else "Not ranked" end
+    ' "$json_file" 2>/dev/null || echo "N/A"
+}
+
+# Display functions
+print_header() {
+    clear || true
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║            🔍 ENHANCED AZTEC VALIDATOR STATS 🔍              ║"
+    echo "║                     by Aabis Lone                           ║"
+    echo "║               Enhanced with Full Features                    ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+}
+
+print_network_stats() {
+    local stats="$1"
+    IFS='|' read -r current_epoch active_validators total_validators finalized_epoch <<< "$stats"
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                        NETWORK OVERVIEW                      ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    printf "%-25s %s\n" "🌐 Current Epoch:" "$current_epoch"
+    printf "%-25s %s\n" "📊 Active Validators:" "$active_validators"
+    printf "%-25s %s\n" "📈 Total Validators:" "$total_validators"
+    printf "%-25s %s\n" "✅ Finalized Epoch:" "$finalized_epoch"
+}
+
+print_validator_stats() {
+    local address="$1"
+    local stats="$2"
+    IFS='|' read -r status attestation_success total_succeeded total_missed blocks_proposed blocks_mined blocks_missed balance effective_balance <<< "$stats"
+    
+    local total_attestations=$((total_succeeded + total_missed))
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                      VALIDATOR DETAILS                       ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    printf "%-25s %s\n" "🔑 Address:" "$address"
+    printf "%-25s %s\n" "📊 Status:" "$status"
+    printf "%-25s %s\n" "💰 Balance:" "$balance"
+    printf "%-25s %s\n" "⚖️  Effective Balance:" "$effective_balance"
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                    ATTESTATION PERFORMANCE                   ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    printf "%-25s %s\n" "🎯 Success Rate:" "$attestation_success"
+    printf "%-25s %s\n" "📊 Total Attestations:" "$total_attestations"
+    printf "%-25s %s\n" "  ├─ ✅ Succeeded:" "$total_succeeded"
+    printf "%-25s %s\n" "  └─ ❌ Missed:" "$total_missed"
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                       BLOCK PERFORMANCE                      ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    printf "%-25s %s\n" "🏗️  Blocks Proposed:" "$blocks_proposed"
+    printf "%-25s %s\n" "⛏️  Blocks Mined:" "$blocks_mined"
+    printf "%-25s %s\n" "❌ Blocks Missed:" "$blocks_missed"
+}
+
+print_slashing_stats() {
+    local slashing_stats="$1"
+    IFS='|' read -r total_events validator_slashes recent_event <<< "$slashing_stats"
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                      SLASHING OVERVIEW                       ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    printf "%-25s %s\n" "🚨 Recent Events:" "$total_events"
+    printf "%-25s %s\n" "⚠️  Your Validator Hits:" "$validator_slashes"
+    printf "%-25s %s\n" "📅 Most Recent Event:" "$recent_event"
+    
+    if [[ "$validator_slashes" != "0" ]]; then
+        warn "⚠️  Your validator has been involved in slashing events!"
+    fi
+}
+
+print_top_validators() {
+    local rank="$1"
+    local window_desc="$2"
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                     VALIDATOR RANKING                        ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    printf "%-25s %s\n" "📊 Analysis Window:" "$window_desc"
+    printf "%-25s %s\n" "🏆 Your Rank:" "$rank"
+    
+    if [[ "$rank" =~ ^[0-9]+$ ]]; then
+        if [[ $rank -le 10 ]]; then
+            success "🎉 Excellent! You're in the top 10 validators!"
+        elif [[ $rank -le 50 ]]; then
+            success "👏 Great performance! You're in the top 50!"
+        elif [[ $rank -le 100 ]]; then
+            info "👍 Good performance! You're in the top 100!"
+        fi
+    fi
+}
+
+print_accusations() {
+    local json_file="$1"
+    
+    echo ""
+    highlight "╔══════════════════════════════════════════════════════════════╗"
+    highlight "║                        ACCUSATIONS                           ║"
+    highlight "╚══════════════════════════════════════════════════════════════╝"
+    
+    if [[ ! -f "$json_file" ]] || ! is_valid_json "$json_file"; then
+        printf "%-25s %s\n" "📋 Status:" "No data available"
+        return
+    fi
+    
+    local total_accusations received_accusations executed_accusations
+    
+    total_accusations=$(jq -r 'length // 0' "$json_file" 2>/dev/null || echo "0")
+    received_accusations=$(jq -r '[.[] | select(.type == "received" or .status == "received")] | length' "$json_file" 2>/dev/null || echo "0")
+    executed_accusations=$(jq -r '[.[] | select(.type == "executed" or .status == "executed")] | length' "$json_file" 2>/dev/null || echo "0")
+    
+    printf "%-25s %s\n" "📋 Total Accusations:" "$total_accusations"
+    printf "%-25s %s\n" "📨 Received:" "$received_accusations"
+    printf "%-25s %s\n" "⚖️  Executed:" "$executed_accusations"
+    
+    if [[ "$total_accusations" != "0" ]]; then
+        warn "⚠️  Your validator has been accused!"
+        
+        # Show recent accusations
+        local recent_accusations
+        recent_accusations=$(jq -r '.[0:3] | .[] | "  • Epoch \(.epoch // .block // "N/A"): \(.type // .reason // "Unknown")"' "$json_file" 2>/dev/null || true)
+        
+        if [[ -n "$recent_accusations" ]]; then
+            echo ""
+            echo "Recent accusations:"
+            echo "$recent_accusations"
+        fi
+    fi
+}
+
+# Usage and help
+usage() {
+    cat <<'EOF'
+Enhanced Aztec Validator Stats Tool
+
+USAGE:
+    aztec-stats <validator_address> [OPTIONS]
+
+VALIDATOR ADDRESS:
+    Ethereum address (0x + 40 hex characters)
+
+OPTIONS:
+    --epochs START:END      Epoch range for top validators (e.g., 1800:1900)
+    --last N                Use last N epochs from current epoch
+    --slashing-limit N      Number of recent slashing events to fetch (default: 50)
+    --cookie TOKEN          Provide cf_clearance token for this session
+    --set-cookie           Interactively set and save cf_clearance token
+    --verbose              Show detailed progress information
+    --debug                Enable debug output
+    --raw                  Show raw API responses on errors
+    --help, -h             Show this help message
+
+EXAMPLES:
+    # Basic validator stats
+    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3
+
+    # With specific epoch range
+    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --epochs 1797:1897
+
+    # Last 100 epochs with cookie setup
+    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --last 100 --set-cookie
+
+    # Debug mode with verbose output
+    aztec-stats 0x581f8afba0ba7aa93c662e730559b63479ba70e3 --debug --verbose
+
+FEATURES:
+    ✅ Network overview (active/total validators, current epoch)
+    ✅ Validator performance (attestations, blocks, balance)
+    ✅ Slashing history and your validator's involvement
+    ✅ Top validator rankings with your position
+    ✅ Accusations received and executed
+    ✅ Cloudflare cookie management
+    ✅ Comprehensive error handling and logging
+
+DATA SOURCE:
+    All data is fetched from dashtec.xyz API
+EOF
+}
 
 # Main execution
-clear 2>/dev/null || true
-echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║               AZTEC VALIDATOR COMPREHENSIVE STATS            ║${NC}"
-echo -e "${CYAN}${BOLD}║                        by Aabis Lone                         ║${NC}"
-echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-
-# Validate inputs
-if [[ -z "$ADDRESS" ]]; then
-    error "Validator address is required"
-    show_help
-    exit 1
-fi
-
-check_dependencies
-validate_address "$ADDRESS"
-load_config
-
-# Handle cookie setup
-if [[ "$SET_COOKIE" == "true" ]]; then
-    setup_cookie
-    [[ -z "${CF_CLEARANCE:-}" ]] && exit 0
-fi
-
-# Convert address to lowercase for API consistency
-ADDRESS_LC=$(echo "$ADDRESS" | tr '[:upper:]' '[:lower:]')
-
-info "Analyzing validator: $ADDRESS_LC"
-echo ""
-
-# Create temporary directory for API responses
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
-
-# =============================================================================
-# 1. NETWORK OVERVIEW
-# =============================================================================
-echo -e "${BOLD}${CYAN}🌐 NETWORK OVERVIEW${NC}"
-echo "════════════════════════════════════════════════════════════════"
-
-NETWORK_FILE="$TEMP_DIR/network.json"
-http_code=$(make_request "$DASHTEC_BASE/stats/general" "$NETWORK_FILE")
-
-if [[ "$http_code" == "200" && -s "$NETWORK_FILE" ]]; then
-    current_epoch=$(jq -r '.currentEpoch // .epoch // "N/A"' "$NETWORK_FILE" 2>/dev/null)
-    active_validators=$(jq -r '.activeValidators // .active // "N/A"' "$NETWORK_FILE" 2>/dev/null)
-    total_validators=$(jq -r '.totalValidators // .total // "N/A"' "$NETWORK_FILE" 2>/dev/null)
+main() {
+    local validator_address=""
+    local epoch_start=""
+    local epoch_end=""
+    local last_n=""
+    local slashing_limit="50"
+    local set_cookie=0
     
-    printf "%-25s %s\n" "Current Epoch:" "$current_epoch"
-    printf "%-25s %s\n" "Active Validators:" "$active_validators"
-    printf "%-25s %s\n" "Total Validators:" "$total_validators"
-    
-    [[ "$DEBUG" == "true" ]] && echo -e "${BLUE}Debug: Network data in $NETWORK_FILE${NC}"
-else
-    warning "Network stats unavailable (HTTP: $http_code)"
-    current_epoch=""
-fi
-
-echo ""
-
-# =============================================================================
-# 2. VALIDATOR DETAILS
-# =============================================================================
-echo -e "${BOLD}${GREEN}📊 VALIDATOR PERFORMANCE${NC}"
-echo "════════════════════════════════════════════════════════════════"
-
-VALIDATOR_FILE="$TEMP_DIR/validator.json"
-http_code=$(make_request "$DASHTEC_BASE/validators/$ADDRESS_LC" "$VALIDATOR_FILE")
-
-if [[ "$http_code" == "200" && -s "$VALIDATOR_FILE" ]]; then
-    # Extract comprehensive validator data
-    status=$(jq -r '.status // "N/A"' "$VALIDATOR_FILE" 2>/dev/null)
-    balance=$(jq -r '.balance // "N/A"' "$VALIDATOR_FILE" 2>/dev/null)
-    
-    # Attestation stats
-    total_attestations=$(jq -r '.totalAttestations // (.totalAttestationsSucceeded + .totalAttestationsMissed) // 0' "$VALIDATOR_FILE" 2>/dev/null)
-    successful_attestations=$(jq -r '.totalAttestationsSucceeded // .attestationsSucceeded // 0' "$VALIDATOR_FILE" 2>/dev/null)
-    missed_attestations=$(jq -r '.totalAttestationsMissed // .attestationsMissed // 0' "$VALIDATOR_FILE" 2>/dev/null)
-    attestation_rate=$(jq -r '.attestationSuccessRate // .attestationSuccess // "N/A"' "$VALIDATOR_FILE" 2>/dev/null)
-    
-    # Block production stats
-    total_proposals=$(jq -r '.totalBlocksProposed // .blocksProposed // 0' "$VALIDATOR_FILE" 2>/dev/null)
-    successful_blocks=$(jq -r '.totalBlocksMined // .blocksMined // .blocksSucceeded // 0' "$VALIDATOR_FILE" 2>/dev/null)
-    missed_blocks=$(jq -r '.totalBlocksMissed // .blocksMissed // 0' "$VALIDATOR_FILE" 2>/dev/null)
-    
-    # Calculate rates if not provided
-    if [[ "$total_attestations" != "0" && "$attestation_rate" == "N/A" ]]; then
-        attestation_rate=$(echo "scale=2; ($successful_attestations * 100) / $total_attestations" | bc 2>/dev/null || echo "N/A")
-        [[ "$attestation_rate" != "N/A" ]] && attestation_rate="${attestation_rate}%"
+    # Parse arguments
+    if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+        usage
+        exit 0
     fi
     
-    block_success_rate="N/A"
-    if [[ "$total_proposals" != "0" ]]; then
-        block_success_rate=$(echo "scale=2; ($successful_blocks * 100) / $total_proposals" | bc 2>/dev/null || echo "N/A")
-        [[ "$block_success_rate" != "N/A" ]] && block_success_rate="${block_success_rate}%"
+    validator_address="$1"
+    shift
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --epochs)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+:[0-9]+$ ]]; then
+                    IFS=':' read -r epoch_start epoch_end <<< "$2"
+                    shift 2
+                else
+                    error "Invalid epochs format. Use: --epochs START:END"
+                    exit 1
+                fi
+                ;;
+            --last)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
+                    last_n="$2"
+                    shift 2
+                else
+                    error "Invalid last epochs format. Use: --last N"
+                    exit 1
+                fi
+                ;;
+            --slashing-limit)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then
+                    slashing_limit="$2"
+                    shift 2
+                else
+                    error "Invalid slashing limit. Use: --slashing-limit N"
+                    exit 1
+                fi
+                ;;
+            --cookie)
+                CF_CLEARANCE="${2:-}"
+                shift 2
+                ;;
+            --set-cookie)
+                set_cookie=1
+                shift
+                ;;
+            --verbose)
+                VERBOSE=1
+                shift
+                ;;
+            --debug)
+                DEBUG=1
+                shift
+                ;;
+            --raw)
+                SHOW_RAW=1
+                shift
+                ;;
+            *)
+                warn "Unknown option: $1"
+                shift
+                ;;
+        esac
+    done
+    
+    # Initialize
+    print_header
+    check_dependencies
+    load_config
+    
+    # Handle cookie setup
+    if [[ $set_cookie -eq 1 && -z "${CF_CLEARANCE:-}" ]]; then
+        prompt_cookie
     fi
     
-    # Display validator info
-    printf "%-25s %s\n" "Status:" "$status"
-    printf "%-25s %s\n" "Balance:" "$balance"
-    echo ""
+    # Validate address
+    validator_address=$(validate_address "$validator_address")
     
-    # Attestation section
-    echo -e "${GREEN}✅ ATTESTATION PERFORMANCE${NC}"
-    printf "%-25s %s\n" "  Total Attestations:" "$total_attestations"
-    printf "%-25s %s\n" "  ├─ Successful:" "$successful_attestations"
-    printf "%-25s %s\n" "  ├─ Missed:" "$missed_attestations"
-    printf "%-25s %s\n" "  └─ Success Rate:" "$attestation_rate"
-    echo ""
+    # Create temporary directory
+    tmpdir=$(mktemp -d)
     
-    # Block production section
-    echo -e "${BLUE}📋 BLOCK PRODUCTION${NC}"
-    printf "%-25s %s\n" "  Total Proposals:" "$total_proposals"
-    printf "%-25s %s\n" "  ├─ Successfully Mined:" "$successful_blocks"
-    printf "%-25s %s\n" "  ├─ Missed:" "$missed_blocks"
-    printf "%-25s %s\n" "  └─ Success Rate:" "$block_success_rate"
+    # File paths
+    local network_json="$tmpdir/network.json"
+    local validator_json="$tmpdir/validator.json"
+    local slashing_json="$tmpdir/slashing.json"
+    local top_json="$tmpdir/top.json"
+    local accusations_json="$tmpdir/accusations.json"
     
-    [[ "$DEBUG" == "true" ]] && echo -e "${BLUE}Debug: Validator data in $VALIDATOR_FILE${NC}"
-elif [[ "$http_code" == "403" ]]; then
-    error "Access forbidden - Cloudflare protection active"
-    echo -e "${YELLOW}💡 Run: aztec-stats $ADDRESS --set-cookie${NC}"
-    exit 1
-else
-    error "Failed to fetch validator data (HTTP: $http_code)"
-    [[ "$DEBUG" == "true" ]] && [[ -s "$VALIDATOR_FILE" ]] && echo -e "${BLUE}Debug: Response in $VALIDATOR_FILE${NC}"
-fi
-
-echo ""
-
-# =============================================================================
-# 3. SLASHING HISTORY
-# =============================================================================
-echo -e "${BOLD}${RED}🔨 SLASHING HISTORY${NC}"
-echo "════════════════════════════════════════════════════════════════"
-
-SLASHING_FILE="$TEMP_DIR/slashing.json"
-http_code=$(make_request "$DASHTEC_BASE/slashing-history?limit=20" "$SLASHING_FILE")
-
-if [[ "$http_code" == "200" && -s "$SLASHING_FILE" ]]; then
-    total_slashing=$(jq -r 'if type=="array" then length else (.data // [] | length) end' "$SLASHING_FILE" 2>/dev/null)
-    my_slashing=$(jq -r --arg addr "$ADDRESS_LC" '
-        (if type=="array" then . else (.data // []) end)
-        | map(select((.validator // .address // "") | ascii_downcase == $addr))
-        | length
-    ' "$SLASHING_FILE" 2>/dev/null)
-    
-    printf "%-25s %s\n" "Recent Slashing Events:" "$total_slashing"
-    printf "%-25s %s\n" "Your Validator:" "$my_slashing"
-    
-    if [[ "$my_slashing" != "0" ]]; then
-        echo -e "${RED}⚠️  Slashing events found for your validator:${NC}"
-        jq -r --arg addr "$ADDRESS_LC" '
-            (if type=="array" then . else (.data // []) end)
-            | map(select((.validator // .address // "") | ascii_downcase == $addr))
-            | .[] | "  Epoch: \(.epoch // "N/A") | Reason: \(.reason // "N/A") | Amount: \(.amount // "N/A")"
-        ' "$SLASHING_FILE" 2>/dev/null || echo "  Unable to parse slashing details"
+    # Fetch network stats
+    if fetch_network_stats "$network_json"; then
+        network_stats=$(parse_network_stats "$network_json")
+        current_epoch=$(echo "$network_stats" | cut -d'|' -f1)
     else
-        success "No slashing events found - Clean record!"
+        network_stats="N/A|N/A|N/A|N/A"
+        current_epoch=""
     fi
     
-    [[ "$DEBUG" == "true" ]] && echo -e "${BLUE}Debug: Slashing data in $SLASHING_FILE${NC}"
-else
-    warning "Slashing history unavailable (HTTP: $http_code)"
-fi
-
-echo ""
-
-# =============================================================================
-# 4. TOP VALIDATORS RANKING (if epoch range provided)
-# =============================================================================
-if [[ -n "$EPOCH_START" && -n "$EPOCH_END" ]] || [[ -n "$LAST_N" && -n "$current_epoch" ]]; then
-    echo -e "${BOLD}${PURPLE}🏆 VALIDATOR RANKING${NC}"
-    echo "════════════════════════════════════════════════════════════════"
+    # Fetch validator stats
+    if ! fetch_validator_stats "$validator_address" "$validator_json"; then
+        cleanup_and_exit 1 "Failed to fetch validator data"
+    fi
+    validator_stats=$(parse_validator_stats "$validator_json")
     
-    TOP_FILE="$TEMP_DIR/top.json"
+    # Fetch slashing history
+    if fetch_slashing_history "$slashing_json" "$slashing_limit"; then
+        slashing_stats=$(parse_slashing_history "$slashing_json" "$validator_address")
+    else
+        slashing_stats="N/A|0|N/A"
+    fi
     
-    if [[ -n "$EPOCH_START" && -n "$EPOCH_END" ]]; then
-        epoch_window="${EPOCH_START}:${EPOCH_END}"
-        http_code=$(make_request "$DASHTEC_BASE/dashboard/top-validators?startEpoch=$EPOCH_START&endEpoch=$EPOCH_END" "$TOP_FILE")
-    elif [[ -n "$LAST_N" && -n "$current_epoch" ]]; then
-        start_epoch=$((current_epoch - LAST_N + 1))
+    # Fetch accusations
+    if fetch_accusations "$validator_address" "$accusations_json"; then
+        accusations_available=1
+    else
+        accusations_available=0
+    fi
+    
+    # Determine epoch range for top validators
+    local window_description="Not specified"
+    local validator_rank="N/A"
+    
+    if [[ -n "$epoch_start" && -n "$epoch_end" ]]; then
+        window_description="Epochs ${epoch_start}:${epoch_end}"
+        if fetch_top_validators "$top_json" "$epoch_start" "$epoch_end"; then
+            validator_rank=$(find_validator_rank "$top_json" "$validator_address")
+        fi
+    elif [[ -n "$last_n" && -n "$current_epoch" && "$current_epoch" != "N/A" ]]; then
+        local start_epoch=$((current_epoch - last_n + 1))
         [[ $start_epoch -lt 0 ]] && start_epoch=0
-        epoch_window="last $LAST_N epochs (${start_epoch}:${current_epoch})"
-        http_code=$(make_request "$DASHTEC_BASE/dashboard/top-validators?startEpoch=$start_epoch&endEpoch=$current_epoch" "$TOP_FILE")
-    fi
-    
-    if [[ "$http_code" == "200" && -s "$TOP_FILE" ]]; then
-        my_rank=$(jq -r --arg addr "$ADDRESS_LC" '
-            (if type=="array" then . else (.data // []) end)
-            | to_entries
-            | map(select((.value.address // .value.validator // "") | ascii_downcase == $addr))
-            | if length > 0 then .[0].key + 1 else empty end
-        ' "$TOP_FILE" 2>/dev/null)
-        
-        total_in_ranking=$(jq -r 'if type=="array" then length else (.data // [] | length) end' "$TOP_FILE" 2>/dev/null)
-        
-        printf "%-25s %s\n" "Epoch Window:" "$epoch_window"
-        printf "%-25s %s\n" "Total Validators Ranked:" "$total_in_ranking"
-        printf "%-25s %s\n" "Your Rank:" "${my_rank:-Not in top ranking}"
-        
-        if [[ -n "$my_rank" ]]; then
-            success "Your validator is ranked #$my_rank"
-        else
-            warning "Your validator not in top performers for this period"
+        window_description="Last ${last_n} epochs (${start_epoch}:${current_epoch})"
+        if fetch_top_validators "$top_json" "$start_epoch" "$current_epoch"; then
+            validator_rank=$(find_validator_rank "$top_json" "$validator_address")
         fi
-        
-        [[ "$DEBUG" == "true" ]] && echo -e "${BLUE}Debug: Ranking data in $TOP_FILE${NC}"
-    else
-        warning "Ranking data unavailable (HTTP: $http_code)"
     fi
     
-    echo ""
-fi
-
-# =============================================================================
-# 5. COMMITTEE PARTICIPATION (Alternative API)
-# =============================================================================
-echo -e "${BOLD}${CYAN}👥 COMMITTEE PARTICIPATION${NC}"
-echo "════════════════════════════════════════════════════════════════"
-
-COMMITTEE_FILE="$TEMP_DIR/committee.json"
-# Try both Dashtec and Aztec APIs for committee data
-http_code=$(make_request "$AZTEC_BASE/validators/$ADDRESS_LC/committees" "$COMMITTEE_FILE")
-
-if [[ "$http_code" != "200" || ! -s "$COMMITTEE_FILE" ]]; then
-    # Fallback to alternative endpoint
-    http_code=$(make_request "$DASHTEC_BASE/validators/$ADDRESS_LC/committees" "$COMMITTEE_FILE")
-fi
-
-if [[ "$http_code" == "200" && -s "$COMMITTEE_FILE" ]]; then
-    committee_count=$(jq -r 'if type=="array" then length else (.data // [] | length) end' "$COMMITTEE_FILE" 2>/dev/null)
+    # Display results
+    print_network_stats "$network_stats"
+    print_validator_stats "$validator_address" "$validator_stats"
+    print_slashing_stats "$slashing_stats"
+    print_top_validators "$validator_rank" "$window_description"
     
-    printf "%-25s %s\n" "Committee Assignments:" "$committee_count"
-    
-    if [[ "$committee_count" != "0" && "$committee_count" != "null" ]]; then
-        echo -e "${CYAN}Recent Committee Roles:${NC}"
-        jq -r '
-            (if type=="array" then . else (.data // []) end)
-            | sort_by(.epoch // 0) | reverse
-            | limit(5; .[])
-            | "  Epoch: \(.epoch // "N/A") | Role: \(.role // .committee // "N/A")"
-        ' "$COMMITTEE_FILE" 2>/dev/null || echo "  Unable to parse committee details"
-        
-        if [[ "$committee_count" -gt 5 ]]; then
-            echo -e "  ${BLUE}... and $((committee_count - 5)) more assignments${NC}"
-        fi
+    if [[ $accusations_available -eq 1 ]]; then
+        print_accusations "$accusations_json"
     else
-        warning "No recent committee assignments found"
+        echo ""
+        highlight "╔══════════════════════════════════════════════════════════════╗"
+        highlight "║                        ACCUSATIONS                           ║"
+        highlight "╚══════════════════════════════════════════════════════════════╝"
+        printf "%-25s %s\n" "📋 Status:" "No accusations data available"
     fi
     
-    [[ "$DEBUG" == "true" ]] && echo -e "${BLUE}Debug: Committee data in $COMMITTEE_FILE${NC}"
-else
-    warning "Committee data unavailable (HTTP: $http_code)"
-fi
-
-echo ""
-
-# =============================================================================
-# SUMMARY AND COMPLETION
-# =============================================================================
-echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════════════════${NC}"
-success "Comprehensive analysis completed for validator: $ADDRESS_LC"
-
-if [[ -n "$EPOCH_START" && -n "$EPOCH_END" ]]; then
-    info "Analysis period: Epochs $EPOCH_START to $EPOCH_END"
-elif [[ -n "$LAST_N" ]]; then
-    info "Analysis period: Last $LAST_N epochs"
-fi
-
-echo -e "${BLUE}📊 Data sources: Dashtec.xyz API, Aztec Network API${NC}"
-echo -e "${YELLOW}💡 For help with options: aztec-stats --help${NC}"
-
-if [[ "$DEBUG" == "true" ]]; then
+    # Summary footer
     echo ""
-    echo -e "${BLUE}🔧 Debug: Temporary files in $TEMP_DIR${NC}"
-    echo -e "${BLUE}   (Files will be automatically cleaned up)${NC}"
-fi
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                         SUMMARY                              ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    success "✅ Data successfully retrieved from dashtec.xyz"
+    info "🕒 Generated on: $(date)"
+    
+    # Debug information
+    if [[ $DEBUG -eq 1 ]]; then
+        echo ""
+        echo "🔍 DEBUG INFORMATION:"
+        echo "  Network data: $network_json"
+        echo "  Validator data: $validator_json"
+        echo "  Slashing data: $slashing_json"
+        [[ -f "$top_json" ]] && echo "  Top validators: $top_json"
+        [[ -f "$accusations_json" ]] && echo "  Accusations: $accusations_json"
+        echo "  Config file: $CONFIG_FILE"
+        echo "  Cache directory: $CACHE_DIR"
+    fi
+    
+    # Cleanup
+    cleanup_and_exit 0
+}
 
-echo -e "${BOLD}${GREEN}════════════════
+# Execute main function with all arguments
+main "$@"

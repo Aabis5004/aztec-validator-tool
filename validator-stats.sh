@@ -325,12 +325,58 @@ parse_network_stats() {
         return
     fi
     
+    debug "Parsing network stats from: $json_file"
+    [[ $DEBUG -eq 1 ]] && echo "Network JSON content:" && jq '.' "$json_file" 2>/dev/null || true
+    
     local current_epoch active_validators total_validators finalized_epoch
     
-    current_epoch=$(jq -r '.currentEpoch // .epoch // .latestEpoch // "N/A"' "$json_file")
-    active_validators=$(jq -r '.activeValidators // .validators.active // .active // "N/A"' "$json_file")
-    total_validators=$(jq -r '.totalValidators // .validators.total // .total // "N/A"' "$json_file")
-    finalized_epoch=$(jq -r '.finalizedEpoch // .finalized // "N/A"' "$json_file")
+    # Try multiple possible field names for current epoch
+    current_epoch=$(jq -r '
+        .currentEpoch // 
+        .epoch // 
+        .latestEpoch // 
+        .current_epoch //
+        .latest_epoch //
+        .headEpoch //
+        .head_epoch //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Try multiple possible field names for active validators
+    active_validators=$(jq -r '
+        .activeValidators // 
+        .validators.active // 
+        .active // 
+        .active_validators //
+        .validatorsActive //
+        .validators_active //
+        .activeValidatorCount //
+        .active_validator_count //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Try multiple possible field names for total validators
+    total_validators=$(jq -r '
+        .totalValidators // 
+        .validators.total // 
+        .total // 
+        .total_validators //
+        .validatorsTotal //
+        .validators_total //
+        .totalValidatorCount //
+        .total_validator_count //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Try multiple possible field names for finalized epoch
+    finalized_epoch=$(jq -r '
+        .finalizedEpoch // 
+        .finalized // 
+        .finalized_epoch //
+        .justifiedEpoch //
+        .justified_epoch //
+        .lastFinalizedEpoch //
+        .last_finalized_epoch //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    debug "Parsed network stats: epoch=$current_epoch, active=$active_validators, total=$total_validators, finalized=$finalized_epoch"
     
     echo "${current_epoch}|${active_validators}|${total_validators}|${finalized_epoch}"
 }
@@ -343,18 +389,100 @@ parse_validator_stats() {
         return
     fi
     
+    debug "Parsing validator stats from: $json_file"
+    [[ $DEBUG -eq 1 ]] && echo "Validator JSON content:" && jq '.' "$json_file" 2>/dev/null || true
+    
     local status attestation_success total_succeeded total_missed
     local blocks_proposed blocks_mined blocks_missed balance effective_balance
     
-    status=$(jq -r '.status // "N/A"' "$json_file")
-    attestation_success=$(jq -r '.attestationSuccess // "N/A"' "$json_file")
-    total_succeeded=$(jq -r '.totalAttestationsSucceeded // 0' "$json_file")
-    total_missed=$(jq -r '.totalAttestationsMissed // 0' "$json_file")
-    blocks_proposed=$(jq -r '.totalBlocksProposed // 0' "$json_file")
-    blocks_mined=$(jq -r '.totalBlocksMined // 0' "$json_file")
-    blocks_missed=$(jq -r '.totalBlocksMissed // 0' "$json_file")
-    balance=$(jq -r '.balance // "N/A"' "$json_file")
-    effective_balance=$(jq -r '.effectiveBalance // "N/A"' "$json_file")
+    # Parse status
+    status=$(jq -r '
+        .status // 
+        .state // 
+        .validatorStatus //
+        .validator_status //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Parse attestation success rate - try percentage and decimal formats
+    attestation_success=$(jq -r '
+        .attestationSuccess // 
+        .attestationSuccessRate //
+        .attestation_success_rate //
+        .successRate //
+        .success_rate //
+        (.totalAttestationsSucceeded / (.totalAttestationsSucceeded + .totalAttestationsMissed) * 100 | tostring + "%") //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Parse attestation counts
+    total_succeeded=$(jq -r '
+        .totalAttestationsSucceeded // 
+        .attestationsSucceeded //
+        .attestations_succeeded //
+        .successfulAttestations //
+        .successful_attestations //
+        0' "$json_file" 2>/dev/null || echo "0")
+    
+    total_missed=$(jq -r '
+        .totalAttestationsMissed // 
+        .attestationsMissed //
+        .attestations_missed //
+        .missedAttestations //
+        .missed_attestations //
+        0' "$json_file" 2>/dev/null || echo "0")
+    
+    # Parse block counts
+    blocks_proposed=$(jq -r '
+        .totalBlocksProposed // 
+        .blocksProposed //
+        .blocks_proposed //
+        .proposedBlocks //
+        .proposed_blocks //
+        0' "$json_file" 2>/dev/null || echo "0")
+    
+    blocks_mined=$(jq -r '
+        .totalBlocksMined // 
+        .blocksMined //
+        .blocks_mined //
+        .minedBlocks //
+        .mined_blocks //
+        0' "$json_file" 2>/dev/null || echo "0")
+    
+    blocks_missed=$(jq -r '
+        .totalBlocksMissed // 
+        .blocksMissed //
+        .blocks_missed //
+        .missedBlocks //
+        .missed_blocks //
+        0' "$json_file" 2>/dev/null || echo "0")
+    
+    # Parse balance - handle different formats (wei, gwei, eth)
+    balance=$(jq -r '
+        .balance // 
+        .validatorBalance //
+        .validator_balance //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Convert balance from wei to ETH if it's a large number
+    if [[ "$balance" =~ ^[0-9]+$ ]] && [[ ${#balance} -gt 10 ]]; then
+        # Looks like wei, convert to ETH
+        balance=$(echo "scale=6; $balance / 1000000000000000000" | bc 2>/dev/null || echo "$balance")
+        balance="${balance} ETH"
+    fi
+    
+    effective_balance=$(jq -r '
+        .effectiveBalance // 
+        .effective_balance //
+        .validatorEffectiveBalance //
+        .validator_effective_balance //
+        "N/A"' "$json_file" 2>/dev/null || echo "N/A")
+    
+    # Convert effective balance from wei to ETH if it's a large number
+    if [[ "$effective_balance" =~ ^[0-9]+$ ]] && [[ ${#effective_balance} -gt 10 ]]; then
+        effective_balance=$(echo "scale=6; $effective_balance / 1000000000000000000" | bc 2>/dev/null || echo "$effective_balance")
+        effective_balance="${effective_balance} ETH"
+    fi
+    
+    debug "Parsed validator stats: status=$status, success=$attestation_success, succeeded=$total_succeeded, missed=$total_missed"
     
     echo "${status}|${attestation_success}|${total_succeeded}|${total_missed}|${blocks_proposed}|${blocks_mined}|${blocks_missed}|${balance}|${effective_balance}"
 }
@@ -368,25 +496,59 @@ parse_slashing_history() {
         return
     fi
     
+    debug "Parsing slashing history from: $json_file for validator: $validator_address"
+    [[ $DEBUG -eq 1 ]] && echo "Slashing JSON content:" && jq '.' "$json_file" 2>/dev/null || true
+    
     local total_events validator_slashes recent_event
     
-    total_events=$(jq -r 'if type=="array" then length else (.data|length // 0) end' "$json_file")
+    # Handle both array format and object with data field
+    total_events=$(jq -r '
+        if type=="array" then 
+            length 
+        else 
+            (.data // [] | length) // 
+            (.slashings // [] | length) // 
+            (.events // [] | length) // 
+            0 
+        end' "$json_file" 2>/dev/null || echo "0")
     
+    # Find slashing events for this validator (try multiple field names)
     validator_slashes=$(jq -r --arg addr "$validator_address" '
-        (if has("data") then .data else . end)
+        def get_events:
+            if type=="array" then . 
+            else (.data // .slashings // .events // []) end;
+        
+        get_events
         | if type=="array" then
             [ .[] | select(
-                (.validator // .address // .pubkey // "") | ascii_downcase == ($addr | ascii_downcase)
+                (.validator // .address // .pubkey // .validatorAddress // .validator_address // "") 
+                | ascii_downcase == ($addr | ascii_downcase)
             )] | length
           else 0 end
-    ' "$json_file")
+    ' "$json_file" 2>/dev/null || echo "0")
     
+    # Get most recent event info (epoch/slot/block)
     recent_event=$(jq -r '
-        (if has("data") then .data else . end)
+        def get_events:
+            if type=="array" then . 
+            else (.data // .slashings // .events // []) end;
+        
+        get_events
         | if type=="array" and length > 0 then
-            .[0] | (.epoch // .slot // "N/A")
+            .[0] | (
+                .epoch // 
+                .slot // 
+                .block // 
+                .blockNumber // 
+                .block_number //
+                .slotNumber //
+                .slot_number //
+                "N/A"
+            )
           else "N/A" end
-    ' "$json_file")
+    ' "$json_file" 2>/dev/null || echo "N/A")
+    
+    debug "Parsed slashing stats: total=$total_events, validator_hits=$validator_slashes, recent=$recent_event"
     
     echo "${total_events}|${validator_slashes}|${recent_event}"
 }
@@ -703,6 +865,14 @@ main() {
     if fetch_network_stats "$network_json"; then
         network_stats=$(parse_network_stats "$network_json")
         current_epoch=$(echo "$network_stats" | cut -d'|' -f1)
+        
+        # If we're still getting N/A values in debug mode, show the raw JSON
+        if [[ $DEBUG -eq 1 && "$network_stats" == "N/A|N/A|N/A|N/A" ]]; then
+            warn "Network stats parsing failed. Raw JSON response:"
+            echo "--- NETWORK API RESPONSE ---"
+            cat "$network_json" 2>/dev/null || echo "Failed to read response file"
+            echo "--- END RESPONSE ---"
+        fi
     else
         network_stats="N/A|N/A|N/A|N/A"
         current_epoch=""
@@ -713,6 +883,18 @@ main() {
         cleanup_and_exit 1 "Failed to fetch validator data"
     fi
     validator_stats=$(parse_validator_stats "$validator_json")
+    
+    # Debug validator parsing if needed
+    if [[ $DEBUG -eq 1 ]]; then
+        debug "Raw validator stats result: $validator_stats"
+        # Show specific parsing issues
+        if echo "$validator_stats" | grep -q "N/A.*N/A.*N/A"; then
+            warn "Some validator data could not be parsed. Check JSON structure:"
+            echo "--- VALIDATOR API RESPONSE (first 500 chars) ---"
+            head -c 500 "$validator_json" 2>/dev/null || echo "Failed to read response file"
+            echo "--- END PARTIAL RESPONSE ---"
+        fi
+    fi
     
     # Fetch slashing history
     if fetch_slashing_history "$slashing_json" "$slashing_limit"; then
@@ -744,6 +926,19 @@ main() {
         if fetch_top_validators "$top_json" "$start_epoch" "$current_epoch"; then
             validator_rank=$(find_validator_rank "$top_json" "$validator_address")
         fi
+    elif [[ -n "$current_epoch" && "$current_epoch" != "N/A" ]]; then
+        # Default to last 50 epochs if we have current epoch but no specific range
+        local default_range=50
+        local start_epoch=$((current_epoch - default_range + 1))
+        [[ $start_epoch -lt 0 ]] && start_epoch=0
+        window_description="Auto: Last ${default_range} epochs (${start_epoch}:${current_epoch})"
+        info "No epoch range specified, using default last $default_range epochs"
+        if fetch_top_validators "$top_json" "$start_epoch" "$current_epoch"; then
+            validator_rank=$(find_validator_rank "$top_json" "$validator_address")
+        fi
+    else
+        warn "Cannot determine epoch range - current epoch unknown. Use --epochs START:END or --last N"
+        window_description="Cannot determine (no current epoch)"
     fi
     
     # Display results
